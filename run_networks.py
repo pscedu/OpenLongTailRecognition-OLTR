@@ -1,74 +1,56 @@
 import os
 import copy
+import logging
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-from tqdm import tqdm
 from utils import *
 import time
 import numpy as np
-import warnings
-import pdb
+np.set_printoptions(threshold=np.inf)
+import json
+import progressbar
+
+from utils import source_import
+
 
 class model ():
-    
-    def __init__(self, config, data, test=False):
+
+    TOP_N = 3
+
+    def __init__(self, config, weights_path):
 
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         self.config = config
         self.training_opt = self.config['training_opt']
         self.memory = self.config['memory']
-        self.data = data
-        self.test_mode = test
-        
-        # Initialize model
-        self.init_models()
 
-        # Under training mode, initialize training steps, optimizers, schedulers, criterions, and centroids
-        if not self.test_mode:
+        self.init_models(weights_path)
 
-            # If using steps for training, we need to calculate training steps 
-            # for each epoch based on actual number of training data instead of 
-            # oversampled data number 
-            print('Using steps for training.')
-            self.training_data_num = len(self.data['train'].dataset)
-            self.epoch_steps = int(self.training_data_num  \
-                                   / self.training_opt['batch_size'])
-
-            # Initialize model optimizer and scheduler
-            print('Initializing model optimizer.')
-            self.scheduler_params = self.training_opt['scheduler_params']
-            self.model_optimizer, \
-            self.model_optimizer_scheduler = self.init_optimizers(self.model_optim_params_list)
-            self.init_criterions()
-            if self.memory['init_centroids']:
-                self.criterions['FeatureLoss'].centroids.data = \
-                    self.centroids_cal(self.data['train_plain'])
-            
         # Set up log file
         self.log_file = os.path.join(self.training_opt['log_dir'], 'log.txt')
-        if os.path.isfile(self.log_file):
-            os.remove(self.log_file)
-        
-    def init_models(self, optimizer=True):
+        print("Logging into ", self.log_file)
+        # if os.path.isfile(self.log_file):
+        #     os.remove(self.log_file)
+
+    def init_models(self, weights_path):
+        logging.info('Initializng models...')
 
         networks_defs = self.config['networks']
         self.networks = {}
         self.model_optim_params_list = []
 
-        print("Using", torch.cuda.device_count(), "GPUs.")
-        
         for key, val in networks_defs.items():
+            logging.debug('key: %s, value: %s', key, str(val))
 
             # Networks
             def_file = val['def_file']
             model_args = list(val['params'].values())
-            model_args.append(self.test_mode)
 
-            self.networks[key] = source_import(def_file).create_model(*model_args)
+            self.networks[key] = source_import(def_file).create_model(weights_path=weights_path, *model_args)
             self.networks[key] = nn.DataParallel(self.networks[key]).to(self.device)
-            
+
             if 'fix' in val and val['fix']:
                 print('Freezing feature weights except for modulated attention weights (if exist).')
                 for param_name, param in self.networks[key].named_parameters():
@@ -94,7 +76,7 @@ class model ():
             loss_args = val['loss_params'].values()
             self.criterions[key] = source_import(def_file).create_loss(*loss_args).to(self.device)
             self.criterion_weights[key] = val['weight']
-          
+
             if val['optim_params']:
                 print('Initializing criterion optimizer.')
                 optim_params = val['optim_params']
@@ -115,60 +97,21 @@ class model ():
                                               gamma=self.scheduler_params['gamma'])
         return optimizer, scheduler
 
-    def batch_forward (self, inputs, labels=None, centroids=False, feature_ext=False, phase='train'):
-        '''
-        This is a general single batch running function. 
-        '''
+    def train(self, training_data, val_data, save_model_dir):
+        self.test_mode = False
 
-        # Calculate Features
-        self.features, self.feature_maps = self.networks['feat_model'](inputs)
-
-        # If not just extracting features, calculate logits
-        if not feature_ext:
-
-            # During training, calculate centroids if needed to 
-            if phase != 'test':
-                if centroids and 'FeatureLoss' in self.criterions.keys():
-                    self.centroids = self.criterions['FeatureLoss'].centroids.data
-                else:
-                    self.centroids = None
-
-            # Calculate logits with classifier
-            self.logits, self.direct_memory_feature = self.networks['classifier'](self.features, self.centroids)
-
-    def batch_backward(self):
-        # Zero out optimizer gradients
-        self.model_optimizer.zero_grad()
-        if self.criterion_optimizer:
-            self.criterion_optimizer.zero_grad()
-        # Back-propagation from loss outputs
-        self.loss.backward()
-        # Step optimizers
-        self.model_optimizer.step()
-        if self.criterion_optimizer:
-            self.criterion_optimizer.step()
-
-    def batch_loss(self, labels):
-
-        # First, apply performance loss
-        self.loss_perf = self.criterions['PerformanceLoss'](self.logits, labels) \
-                    * self.criterion_weights['PerformanceLoss']
-
-        # Add performance loss to total loss
-        self.loss = self.loss_perf
-
-        # Apply loss on features if set up
-        if 'FeatureLoss' in self.criterions.keys():
-            self.loss_feat = self.criterions['FeatureLoss'](self.features, labels)
-            self.loss_feat = self.loss_feat * self.criterion_weights['FeatureLoss']
-            # Add feature loss to total loss
-            self.loss += self.loss_feat
-
-    def train(self):
+        # Initialize model optimizer and scheduler
+        print('Initializing model optimizer.')
+        self.scheduler_params = self.training_opt['scheduler_params']
+        self.model_optimizer, self.model_optimizer_scheduler = self.init_optimizers(
+            self.model_optim_params_list)
+        self.init_criterions()
+        if self.memory['init_centroids']:
+            self.criterions['FeatureLoss'].centroids.data = \
+                self.centroids_cal(training_data)
 
         # When training the network
-        print_str = ['Phase: train']
-        print_write(print_str, self.log_file)
+        print_write(['Phase: train'], self.log_file)
         time.sleep(0.25)
 
         # Initialize best model
@@ -179,176 +122,205 @@ class model ():
         best_epoch = 0
 
         end_epoch = self.training_opt['num_epochs']
-
         # Loop over epochs
         for epoch in range(1, end_epoch + 1):
+            print('epoch: %d' % epoch)
 
             for model in self.networks.values():
                 model.train()
-                
+                model.cuda()
+
             torch.cuda.empty_cache()
-            
+
             # Iterate over dataset
-            for step, (inputs, labels, _) in enumerate(self.data['train']):
+            epoch_loss = 0.0
+            for batch in progressbar.progressbar(training_data):
 
                 # Break when step equal to epoch step
-                if step == self.epoch_steps:
-                    break
+                # if step == self.epoch_steps:
+                #     break
 
-                inputs, labels = inputs.to(self.device), labels.to(self.device)
+                inputs = batch['image']
+                labels = batch['name_id']
+                objectids = batch['objectid']
 
-                # If on training phase, enable gradients
+                inputs, labels = inputs.cuda(), labels.cuda()
+
                 with torch.set_grad_enabled(True):
-                        
-                    # If training, forward with loss, and no top 5 accuracy calculation
-                    self.batch_forward(inputs, labels, 
-                                       centroids=self.memory['centroids'],
-                                       phase='train')
-                    self.batch_loss(labels)
-                    self.batch_backward()
 
-                    # Output minibatch training results
-                    if step % self.training_opt['display_step'] == 0:
+                    self.features, _ = self.networks['feat_model'](inputs)
+                    centroids = self.memory['centroids']
+                    feature_ext = False
+                    if not feature_ext:
+                        # During training, calculate centroids if needed to
+                        if centroids and 'FeatureLoss' in self.criterions.keys(
+                        ):
+                            self.centroids = self.criterions[
+                                'FeatureLoss'].centroids.data
+                        else:
+                            self.centroids = None
 
-                        minibatch_loss_feat = self.loss_feat.item() \
-                            if 'FeatureLoss' in self.criterions.keys() else None
-                        minibatch_loss_perf = self.loss_perf.item()
-                        _, preds = torch.max(self.logits, 1)
-                        minibatch_acc = mic_acc_cal(preds, labels)
+                            # Calculate logits with classifier
+                        self.logits, self.direct_memory_feature = self.networks[
+                            'classifier'](self.features, self.centroids)
 
-                        print_str = ['Epoch: [%d/%d]' 
-                                     % (epoch, self.training_opt['num_epochs']),
-                                     'Step: %5d' 
-                                     % (step),
-                                     'Minibatch_loss_feature: %.3f' 
-                                     % (minibatch_loss_feat) if minibatch_loss_feat else '',
-                                     'Minibatch_loss_performance: %.3f' 
-                                     % (minibatch_loss_perf),
-                                     'Minibatch_accuracy_micro: %.3f'
-                                      % (minibatch_acc)]
-                        print_write(print_str, self.log_file)
+                    self.loss_perf = self.criterions['PerformanceLoss'](
+                        self.logits,
+                        labels) * self.criterion_weights['PerformanceLoss']
 
-            # Set model modes and set scheduler
-            # In training, step optimizer scheduler and set model to train()
-            self.model_optimizer_scheduler.step()
-            if self.criterion_optimizer:
-                self.criterion_optimizer_scheduler.step()
+                    # Add performance loss to total loss
+                    self.loss = self.loss_perf
+
+                    # Apply loss on features if set up
+                    if 'FeatureLoss' in self.criterions.keys():
+                        self.loss_feat = self.criterions['FeatureLoss'](
+                            self.features, labels)
+                        self.loss_feat = self.loss_feat * self.criterion_weights[
+                            'FeatureLoss']
+                        self.loss += self.loss_feat
+
+                    epoch_loss = epoch_loss + self.loss
+
+                    self.model_optimizer.zero_grad()
+                    if self.criterion_optimizer:
+                        self.criterion_optimizer.zero_grad()
+                    # Back-propagation from loss outputs
+                    self.loss.backward()
+                    self.model_optimizer.step()
+                    if self.criterion_optimizer:
+                        self.criterion_optimizer.step()
+
+            _, preds = torch.max(self.logits, 1)
+            epoch_accuracy = (preds == labels).sum().item() / len(labels)
+            print("Epoch-train-loss:'", epoch_loss.item(),
+                  " Epoch-train-accuracy:'", epoch_accuracy)
 
             # After every epoch, validation
-            self.eval(phase='val')
+            res = self.eval(val_data)
 
             # Under validation, the best model need to be updated
-            if self.eval_acc_mic_top1 > best_acc:
+            if res > best_acc:
                 best_epoch = copy.deepcopy(epoch)
-                best_acc = copy.deepcopy(self.eval_acc_mic_top1)
+                best_acc = copy.deepcopy(res)
                 best_centroids = copy.deepcopy(self.centroids)
                 best_model_weights['feat_model'] = copy.deepcopy(self.networks['feat_model'].state_dict())
                 best_model_weights['classifier'] = copy.deepcopy(self.networks['classifier'].state_dict())
+                self.save_model(save_model_dir,
+                                epoch,
+                                best_epoch,
+                                best_model_weights,
+                                best_acc,
+                                centroids=best_centroids)
 
-        print()
         print('Training Complete.')
-
-        print_str = ['Best validation accuracy is %.3f at epoch %d' % (best_acc, best_epoch)]
-        print_write(print_str, self.log_file)
-        # Save the best model and best centroids if calculated
-        self.save_model(epoch, best_epoch, best_model_weights, best_acc, centroids=best_centroids)
-                
         print('Done')
 
-    def eval(self, phase='val', openset=False):
+    def eval(self, data, openset=False):
+        '''
+        Evaluate the loaded model on the provided data. 
+        This function is called after each epoch at training.
+        '''
+        self.test_mode = False
 
-        print_str = ['Phase: %s' % (phase)]
-        print_write(print_str, self.log_file)
+        print_write(['Phase: eval'], self.log_file)
         time.sleep(0.25)
 
         if openset:
-            print('Under openset test mode. Open threshold is %.1f' 
-                  % self.training_opt['open_threshold'])
- 
+            print('Under openset test mode. Open threshold is %.1f' %
+                  self.training_opt['open_threshold'])
+
         torch.cuda.empty_cache()
 
         # In validation or testing mode, set model to eval() and initialize running loss/correct
         for model in self.networks.values():
             model.eval()
+            model.cuda()
 
         self.total_logits = torch.empty((0, self.training_opt['num_classes'])).to(self.device)
         self.total_labels = torch.empty(0, dtype=torch.long).to(self.device)
         self.total_paths = np.empty(0)
 
         # Iterate over dataset
-        for inputs, labels, paths in tqdm(self.data[phase]):
-            inputs, labels = inputs.to(self.device), labels.to(self.device)
+        for valid in progressbar.progressbar(data):
+            inputs = valid["image"].to(self.device)
+            labels = valid["name_id"].to(self.device)
 
             # If on training phase, enable gradients
             with torch.set_grad_enabled(False):
 
                 # In validation or testing
-                self.batch_forward(inputs, labels, 
-                                   centroids=self.memory['centroids'],
-                                   phase=phase)
+                centroids = self.memory['centroids']
+                phase = 'val'
+                self.features, _ = self.networks['feat_model'](inputs)
+                feature_ext = False
+                # If not just extracting features, calculate logits
+                if not feature_ext:
+
+                    # During training, calculate centroids if needed to
+                    if phase != 'test':
+                        if centroids and 'FeatureLoss' in self.criterions.keys(
+                        ):
+                            self.centroids = self.criterions[
+                                'FeatureLoss'].centroids.data
+                        else:
+                            self.centroids = None
+
+                    # Calculate logits with classifier
+                    self.logits, self.direct_memory_feature = self.networks[
+                        'classifier'](self.features, self.centroids)
                 self.total_logits = torch.cat((self.total_logits, self.logits))
                 self.total_labels = torch.cat((self.total_labels, labels))
-                self.total_paths = np.concatenate((self.total_paths, paths))
+        #        self.total_paths = np.concatenate((self.total_paths, paths))
 
-        probs, preds = F.softmax(self.total_logits.detach(), dim=1).max(dim=1)
+        batch_size = self.total_labels.size(0)
 
-        if openset:
-            preds[probs < self.training_opt['open_threshold']] = -1
-            self.openset_acc = mic_acc_cal(preds[self.total_labels == -1],
-                                            self.total_labels[self.total_labels == -1])
-            print('\n\nOpenset Accuracy: %.3f' % self.openset_acc)
+        _, pred = self.total_logits.topk(5, 1, True, True)
+        pred = pred.t()
+        correct = pred.eq(self.total_labels.view(1, -1).expand_as(pred))
 
-        # Calculate the overall accuracy and F measurement
-        self.eval_acc_mic_top1= mic_acc_cal(preds[self.total_labels != -1],
-                                            self.total_labels[self.total_labels != -1])
-        self.eval_f_measure = F_measure(preds, self.total_labels, openset=openset,
-                                        theta=self.training_opt['open_threshold'])
-        self.many_acc_top1, \
-        self.median_acc_top1, \
-        self.low_acc_top1 = shot_acc(preds[self.total_labels != -1],
-                                     self.total_labels[self.total_labels != -1], 
-                                     self.data['train'])
-        # Top-1 accuracy and additional string
-        print_str = ['\n\n',
-                     'Phase: %s' 
-                     % (phase),
-                     '\n\n',
-                     'Evaluation_accuracy_micro_top1: %.3f' 
-                     % (self.eval_acc_mic_top1),
-                     '\n',
-                     'Averaged F-measure: %.3f' 
-                     % (self.eval_f_measure),
-                     '\n',
-                     'Many_shot_accuracy_top1: %.3f' 
-                     % (self.many_acc_top1),
-                     'Median_shot_accuracy_top1: %.3f' 
-                     % (self.median_acc_top1),
-                     'Low_shot_accuracy_top1: %.3f' 
-                     % (self.low_acc_top1),
-                     '\n']
+        #print(correct.shape)
 
-        if phase == 'val':
-            print_write(print_str, self.log_file)
-        else:
-            print(*print_str)
-            
+        correct_k = correct[:5].reshape(-1).float().sum(0)
+        res = (correct_k.mul_(100.0 / batch_size)).item()
+        print("Eval-Accuracy :", res)
+        return res
+
     def centroids_cal(self, data):
 
         centroids = torch.zeros(self.training_opt['num_classes'],
-                                   self.training_opt['feature_dim']).cuda()
+                                self.training_opt['feature_dim']).cuda()
 
         print('Calculating centroids.')
 
         for model in self.networks.values():
             model.eval()
 
-        # Calculate initial centroids only on training data.
         with torch.set_grad_enabled(False):
-            
-            for inputs, labels, _ in tqdm(data):
-                inputs, labels = inputs.to(self.device), labels.to(self.device)
+
+            for p in progressbar.progressbar(data):
+                inputs, labels = p["image"].to(self.device), p["name_id"].to(
+                    self.device)
+
                 # Calculate Features of each training data
-                self.batch_forward(inputs, feature_ext=True)
+                self.features, _ = self.networks['feat_model'](inputs)
+
+                feature_ext = True
+                # If not just extracting features, calculate logits
+                if not feature_ext:
+
+                    # During training, calculate centroids if needed to
+                    if not self.test_mode:
+                        if centroids and 'FeatureLoss' in self.criterions.keys(
+                        ):
+                            self.centroids = self.criterions[
+                                'FeatureLoss'].centroids.data
+                        else:
+                            self.centroids = None
+
+                    # Calculate logits with classifier
+                    self.logits, self.direct_memory_feature = self.networks[
+                        'classifier'](self.features, self.centroids)
+
                 # Add all calculated features to center tensor
                 for i in range(len(labels)):
                     label = labels[i]
@@ -359,44 +331,103 @@ class model ():
 
         return centroids
 
-    def load_model(self):
-            
-        model_dir = os.path.join(self.training_opt['log_dir'], 
-                                 'final_model_checkpoint.pth')
-        
-        print('Validation on the best model.')
-        print('Loading model from %s' % (model_dir))
-        
-        checkpoint = torch.load(model_dir)          
+    def load_model(self, model_dir):
+
+        model_path = os.path.join(model_dir, 'final_model_checkpoint.pth')
+        print('Loading model from %s' % (model_path))
+
+        checkpoint = torch.load(model_path)
         model_state = checkpoint['state_dict_best']
-        
-        self.centroids = checkpoint['centroids'] if 'centroids' in checkpoint else None
-        
+
+        self.centroids = checkpoint[
+            'centroids'] if 'centroids' in checkpoint else None
+
         for key, model in self.networks.items():
 
             weights = model_state[key]
-            weights = {k: weights[k] for k in weights if k in model.state_dict()}
+            weights = {
+                k: weights[k]
+                for k in weights if k in model.state_dict()
+            }
             # model.load_state_dict(model_state[key])
             model.load_state_dict(weights)
-        
-    def save_model(self, epoch, best_epoch, best_model_weights, best_acc, centroids=None):
-        
-        model_states = {'epoch': epoch,
-                'best_epoch': best_epoch,
-                'state_dict_best': best_model_weights,
-                'best_acc': best_acc,
-                'centroids': centroids}
 
-        model_dir = os.path.join(self.training_opt['log_dir'], 
-                                 'final_model_checkpoint.pth')
+    def save_model(self,
+                   model_dir,
+                   epoch,
+                   best_epoch,
+                   best_model_weights,
+                   best_acc,
+                   centroids=None):
 
-        torch.save(model_states, model_dir)
-            
+        model_states = {
+            'epoch': epoch,
+            'best_epoch': best_epoch,
+            'state_dict_best': best_model_weights,
+            'best_acc': best_acc,
+            'centroids': centroids
+        }
+
+        print('Saving model at: %s' % model_dir)
+        model_path = os.path.join(model_dir, 'final_model_checkpoint.pth')
+
+        torch.save(model_states, model_path)
+
     def output_logits(self, openset=False):
-        filename = os.path.join(self.training_opt['log_dir'], 
-                                'logits_%s'%('open' if openset else 'close'))
+        filename = os.path.join(self.training_opt['log_dir'],
+                                'logits_%s' % ('open' if openset else 'close'))
         print("Saving total logits to: %s.npz" % filename)
-        np.savez(filename, 
-                 logits=self.total_logits.detach().cpu().numpy(), 
+        np.savez(filename,
+                 logits=self.total_logits.detach().cpu().numpy(),
                  labels=self.total_labels.detach().cpu().numpy(),
                  paths=self.total_paths)
+
+    def infer(self, unlabeled_data):
+        print_write(['Phase: inference'], self.log_file)
+        time.sleep(0.25)
+
+        torch.cuda.empty_cache()
+
+        # In validation or testing mode, set model to eval() and initialize running loss/correct
+        for model in self.networks.values():
+            model.eval()
+            model.cuda()
+
+        # The full dataset.
+        full_objectids = np.array((0, 1), dtype=np.uint32)
+        full_probs = np.array((0, self.TOP_N), dtype=float)
+        full_preds = np.array((0, self.TOP_N), dtype=int)
+
+        with torch.set_grad_enabled(False):
+            for batch in progressbar.progressbar(unlabeled_data):
+                if batch is None:
+                    assert 0, 'How did this happen?'
+                inputs = batch["image"].to(self.device)
+                object_ids = batch['objectid'].cpu().numpy()
+                print('object_ids: ', object_ids.shape)
+                # TODO: is it needed?
+                # inputs = Variable(inputs)
+
+                # In validation or testing
+                centroids = self.memory['centroids']
+                features, _ = self.networks['feat_model'](inputs)
+                logits, _ = self.networks['classifier'](features, centroids)
+                #self.total_logits = torch.cat((self.total_logits, self.logits))
+
+                probs, preds = F.softmax(logits.detach(), dim=1).topk(k=3,
+                                                                      dim=1)
+
+                probs = probs.cpu().numpy()
+                print('probs: ', probs.shape)
+                preds = preds.cpu().numpy()
+                print('preds: ', preds.shape)
+
+                # Openset is thresholded at postprocessing.
+                # Unthresholded preds are needed for ROC curves.
+                # preds[probs < self.training_opt['open_threshold']] = -1
+
+                full_objectids = np.vstack(full_objectids, object_ids)
+                full_probs = np.vstack(full_probs, probs)
+                full_preds = np.vstack(full_preds, preds)
+
+        return full_objectids, full_preds, full_probs
