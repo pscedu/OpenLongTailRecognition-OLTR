@@ -13,13 +13,14 @@ class DotProduct_Classifier(nn.Module):
         return x, None
     
 def create_model(feat_dim, num_classes=1000, stage1_weights=False, dataset=None, test=False, 
-                 weights_path='./logs/%s/stage1/final_model_checkpoint.pth', *args):
+                 weights_path=None, *args):
     print('Loading Dot Product Classifier.')
     clf = DotProduct_Classifier(num_classes, feat_dim)
 
     if not test:
         if stage1_weights:
-            assert(dataset)
+            assert dataset
+            assert weights_path is not None
             print('Loading %s Stage 1 Classifier Weights from %s.' % (dataset, weights_path))
             assert(os.path.exists(weights_path))
             clf.fc = init_weights(model=clf.fc,

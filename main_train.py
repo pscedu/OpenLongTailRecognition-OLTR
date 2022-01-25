@@ -39,7 +39,7 @@ def train(args):
         os.makedirs(args.output_dir)
 
     config = utils.source_import(args.config).config
-    config['training_opt']['log_dir'] = args.output_dir
+    # config['training_opt']['log_dir'] = args.output_dir
     pprint.pprint(config)
     save_model_dir = args.output_dir
     if args.init_weights_dir is not None:
@@ -104,7 +104,7 @@ def train(args):
     print("Training samples ", len(train_sampler))
     print("Validation samples ", len(valid_sampler))
 
-    model = run_networks.model(config, weights_path)
+    model = run_networks.model(config, test=False, init_weights_path=weights_path)
     logging.info('Created training model.')
 
     # TODO: replace batch_size in configs with command line.

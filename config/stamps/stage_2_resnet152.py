@@ -73,6 +73,6 @@ criterions['FeatureLoss'] = {
 config['criterions'] = criterions
 
 memory = {}
-memory['centroids'] = True
+memory['use_centroids'] = True
 memory['init_centroids'] = True
 config['memory'] = memory

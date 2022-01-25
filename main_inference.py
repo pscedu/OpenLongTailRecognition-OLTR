@@ -6,6 +6,7 @@ import torch
 import pprint
 import shutil
 from torchvision import transforms
+import progressbar
 
 import run_networks
 import utils
@@ -18,9 +19,10 @@ def get_parser():
                         type=str)
     parser.add_argument('--shuffler_dir', required=True, type=str)
     parser.add_argument('--rootdir', required=True, type=str)
-    parser.add_argument('--model_dir', required=True, type=str)
+    parser.add_argument('--weights_dir', required=True, type=str)
     parser.add_argument('--in_db_file', required=True, type=str)
     parser.add_argument('--out_db_file', required=True, type=str)
+    parser.add_argument('--batch_size', type=int, default=50)
     # parser.add_argument('--log_dir', required=True, type=str)
     parser.add_argument(
         "--logging_level",
@@ -58,28 +60,31 @@ def inference(args):
                                      rootdir=args.rootdir,
                                      mode='w',
                                      used_keys=['image', 'objectid'],
-                                     transform_group={'image': transform})
+                                     transform_group={'image': transform},
+                                     copy_to_memory=False)
 
-    # TODO: replace batch_size in with command line.
     dataloader = torch.utils.data.DataLoader(dataset,
-                                             batch_size=1,
+                                             batch_size=args.batch_size,
                                              shuffle=False,
                                              num_workers=1)
 
-    model = run_networks.model(config)
-    model.load_model(args.model_dir)
+    weights_path = os.path.join(args.weights_dir, 'final_model_checkpoint.pth')
+    model = run_networks.model(config, test=True)
+    model.load_model(weights_path)
 
     objectids, preds, probs = model.infer(dataloader)
 
     # Record the results.
-    c = dataset.cursor
-    for objectid, pred, prob in zip(objectids, preds, probs):
+    for objectid, pred, prob in progressbar.progressbar(zip(objectids, preds, probs)):
         # NOTE: Currently writing only top-1.
-        name_id = pred[0]
-        score = prob[0]
-        c.execute('UPDATE objects SET name=?,score=? WHERE objectid=?',
-                  (str(name_id), score, objectid))
+        objectid = int(objectid)
+        name_id = str(pred[0])
+        score = float(prob[0])
+        print ('Setting name_id %03d with score %.3f to object %d' % (name_id, score, objectid))
+        dataset.execute('UPDATE objects SET name=?,score=? WHERE objectid=?', (name_id, score, objectid))
     dataset.conn.commit()
+    print('Found distinct names: ', dataset.execute('SELECT COUNT(DISTINCT(name)) FROM objects'))
+    dataset.close()
 
 
 def main():

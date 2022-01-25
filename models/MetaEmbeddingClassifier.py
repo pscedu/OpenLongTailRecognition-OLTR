@@ -52,13 +52,14 @@ class MetaEmbedding_Classifier(nn.Module):
         return logits, [direct_feature, infused_feature]
     
 def create_model(feat_dim=2048, num_classes=1000, stage1_weights=False, dataset=None, test=False, 
-                 weights_path='./logs/%s/stage1/final_model_checkpoint.pth', *args):
+                 weights_path=None, *args):
     print('Loading Meta Embedding Classifier.')
     clf = MetaEmbedding_Classifier(feat_dim, num_classes)
 
     if not test:
         if stage1_weights:
-            assert(dataset)
+            assert dataset
+            assert weights_path is not None
             print('Loading %s Stage 1 Classifier Weights from %s.' % (dataset, weights_path))
             assert(os.path.exists(weights_path))
             clf.fc_hallucinator = init_weights(model=clf.fc_hallucinator,
