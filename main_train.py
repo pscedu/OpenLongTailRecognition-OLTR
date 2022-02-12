@@ -16,7 +16,8 @@ def get_parser():
     parser.add_argument('--config', required=True, type=str)
     parser.add_argument('--shuffler_dir', required=True, type=str)
     parser.add_argument('--rootdir', required=True, type=str)
-    parser.add_argument('--db_file', required=True, type=str)
+    parser.add_argument('--train_db_file', required=True, type=str)
+    parser.add_argument('--val_db_file', required=True, type=str)
     parser.add_argument('--init_weights_dir', type=str,
                         help='Load weight from here. Required only for stage 2.')
     parser.add_argument('--output_dir', required=True, type=str)
@@ -52,73 +53,82 @@ def train(args):
         print ('Init weights dir not provided.')
 
     # TODO: add random rotation.
-    transform = transforms.Compose([
+    train_transform = transforms.Compose([
         transforms.ToPILImage(),
         transforms.RandomResizedCrop(224),
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ])
+    val_transform = transforms.Compose([
+        transforms.ToPILImage(),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+    ])
 
-    dataset = datasets.ObjectDataset(
-        args.db_file,
+    train_dataset = datasets.ObjectDataset(
+        args.train_db_file,
         rootdir=args.rootdir,
-        where_object="name NOT LIKE '%page%' AND "
-        "objectid IN (SELECT objectid FROM properties WHERE key = 'name_id')",
+        where_object="name NOT LIKE '%page%' AND objectid IN "
+                     "(SELECT objectid FROM properties WHERE key = 'name_id' AND value != '-1')",
         mode='r',
         used_keys=['image', 'objectid', 'name', 'name_id'],
         transform_group={
-            'image': transform,
+            'image': train_transform,
             'name_id': lambda x: int(x)
         })
-    logging.info("Total number of samples: %d", len(dataset))
+    logging.info("Total number of train samples: %d", len(train_dataset))
 
     # Set num_classes everywhere.
-    # TODO: Set it in the training split, excluding the validation split.
-    num_classes = dataset.execute(
-        "SELECT COUNT(DISTINCT(value)) FROM properties WHERE key == 'name_id' AND value != '-1'"
-    )[0][0]
+    classes_ids = train_dataset.execute(
+        "SELECT DISTINCT(value) FROM properties WHERE key == 'name_id' AND value != '-1'")
+    classes_ids = [x[0] for x in classes_ids]
+    num_classes = len(classes_ids)
     logging.info('num_classes: %d', num_classes)
     config['training_opt']['num_classes'] = num_classes
     config['networks']['classifier']['params']['num_classes'] = num_classes
 
     # open_set = [item for item in data if item["name_id"] == -1]
 
-    validation_split = .2
-    name_ids = dataset.execute(
-        'SELECT value FROM properties WHERE key="name_id" ORDER BY objectid')
-    train_val_indices = [
-        i for i, name_id in enumerate(name_ids) if name_id != ("-1", )
-    ]
-    print(len(train_val_indices), validation_split,
-          validation_split * len(train_val_indices))
-    split = int(np.floor(validation_split * len(train_val_indices)))
-    logging.info('Split at %d', split)
+    classes_ids_str = "'" + "', '".join(classes_ids) + "'"
+    print (classes_ids_str)
+    val_dataset = datasets.ObjectDataset(
+        args.val_db_file,
+        rootdir=args.rootdir,
+        where_object="objectid IN "
+                     "(SELECT objectid FROM properties WHERE key = 'name_id' AND value IN (%s))" % classes_ids_str,
+        mode='r',
+        used_keys=['image', 'objectid', 'name', 'name_id'],
+        transform_group={
+            'image': val_transform,
+            'name_id': lambda x: int(x)
+        })
+    logging.info("Total number of val samples: %d", len(val_dataset))
 
-    # TODO: Need to make splits beforehand via Shuffler.
-    train_indices = train_val_indices   # FIXME: ATTENTION: removed [split:]
-    val_indices = train_val_indices[:split]
-    train_sampler = torch.utils.data.sampler.SubsetRandomSampler(train_indices)
-    valid_sampler = torch.utils.data.sampler.SubsetRandomSampler(val_indices)
-
-    # print(train_indices)
-    print("Training samples ", len(train_sampler))
-    print("Validation samples ", len(valid_sampler))
+    # # Make sure val dataset does not have labels that are not in train dataset.
+    # val_dataset.execute("ATTACH '%s' AS train" % args.train_db_file) 
+    # num_in_val_but_not_in_train = val_dataset.execute(
+    #     "SELECT COUNT(objectid) FROM properties "
+    #     "WHERE key = 'name_id' AND value != '-1' AND value NOT in "
+    #     "(SELECT value FROM train.properties WHERE key='name_id' and value != '-1')")
+    # num_in_val_but_not_in_train = num_in_val_but_not_in_train[0][0]
+    # if num_in_val_but_not_in_train > 0:
+    #     raise ValueError("%d objects have name_ids in val, but not in train." %
+    #         num_in_val_but_not_in_train)
 
     model = run_networks.model(config, test=False, init_weights_path=weights_path)
     logging.info('Created training model.')
 
-    # TODO: replace batch_size in configs with command line.
     train_dataloader = torch.utils.data.DataLoader(
-        dataset,
+        train_dataset,
         batch_size=config['training_opt']['batch_size'],
         num_workers=config['training_opt']['num_workers'],
-        sampler=train_sampler)
+        shuffle=True)
 
     val_dataloader = torch.utils.data.DataLoader(
-        dataset,
+        val_dataset,
         batch_size=config['training_opt']['batch_size'],
-        num_workers=config['training_opt']['num_workers'],
-        sampler=valid_sampler)
+        num_workers=config['training_opt']['num_workers'])
 
     logging.info('Created dataloaders.')
 

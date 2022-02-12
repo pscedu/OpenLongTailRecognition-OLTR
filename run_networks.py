@@ -44,13 +44,13 @@ class model ():
         self.model_optim_params_list = []
 
         for key, val in networks_defs.items():
-            logging.debug('key: %s, value: %s', key, str(val))
+            logging.info('key: %s, value: %s', key, str(val))
 
             # Networks
             def_file = val['def_file']
-            model_args = list(val['params'].values())
+            print ("val['params']", val['params'])
 
-            self.networks[key] = source_import(def_file).create_model(weights_path=init_weights_path, test=test, *model_args)
+            self.networks[key] = source_import(def_file).create_model(weights_path=init_weights_path, test=test, **val['params'])
             self.networks[key] = nn.DataParallel(self.networks[key]).to(self.device)
 
             if 'fix' in val and val['fix']:

@@ -62,6 +62,6 @@ criterions['PerformanceLoss'] = {
 config['criterions'] = criterions
 
 memory = {}
-memory['centroids'] = False
+memory['use_centroids'] = False
 memory['init_centroids'] = False
 config['memory'] = memory
