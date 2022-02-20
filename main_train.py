@@ -41,7 +41,6 @@ def train(args):
 
     config = utils.source_import(args.config).config
     # config['training_opt']['log_dir'] = args.output_dir
-    pprint.pprint(config)
     save_model_dir = args.output_dir
     if args.init_weights_dir is not None:
         weights_path = os.path.join(args.init_weights_dir, 'final_model_checkpoint.pth')
@@ -69,8 +68,6 @@ def train(args):
     train_dataset = datasets.ObjectDataset(
         args.train_db_file,
         rootdir=args.rootdir,
-        where_object="name NOT LIKE '%page%' AND objectid IN "
-                     "(SELECT objectid FROM properties WHERE key = 'name_id' AND value != '-1')",
         mode='r',
         used_keys=['image', 'objectid', 'name', 'name_id'],
         transform_group={
@@ -81,17 +78,20 @@ def train(args):
 
     # Set num_classes everywhere.
     classes_ids = train_dataset.execute(
-        "SELECT DISTINCT(value) FROM properties WHERE key == 'name_id' AND value != '-1'")
+        "SELECT DISTINCT(value) FROM properties WHERE key == 'name_id'")
     classes_ids = [x[0] for x in classes_ids]
     num_classes = len(classes_ids)
     logging.info('num_classes: %d', num_classes)
     config['training_opt']['num_classes'] = num_classes
     config['networks']['classifier']['params']['num_classes'] = num_classes
+    if 'FeatureLoss' in config['criterions']:
+      # This one is only for stage 2.
+      config['criterions']['FeatureLoss']['loss_params']['num_classes'] = num_classes
 
     # open_set = [item for item in data if item["name_id"] == -1]
 
+    # Validation dataset needs to have classes present in training dataset.
     classes_ids_str = "'" + "', '".join(classes_ids) + "'"
-    print (classes_ids_str)
     val_dataset = datasets.ObjectDataset(
         args.val_db_file,
         rootdir=args.rootdir,
@@ -105,17 +105,7 @@ def train(args):
         })
     logging.info("Total number of val samples: %d", len(val_dataset))
 
-    # # Make sure val dataset does not have labels that are not in train dataset.
-    # val_dataset.execute("ATTACH '%s' AS train" % args.train_db_file) 
-    # num_in_val_but_not_in_train = val_dataset.execute(
-    #     "SELECT COUNT(objectid) FROM properties "
-    #     "WHERE key = 'name_id' AND value != '-1' AND value NOT in "
-    #     "(SELECT value FROM train.properties WHERE key='name_id' and value != '-1')")
-    # num_in_val_but_not_in_train = num_in_val_but_not_in_train[0][0]
-    # if num_in_val_but_not_in_train > 0:
-    #     raise ValueError("%d objects have name_ids in val, but not in train." %
-    #         num_in_val_but_not_in_train)
-
+    pprint.pprint(config)
     model = run_networks.model(config, test=False, init_weights_path=weights_path)
     logging.info('Created training model.')
 

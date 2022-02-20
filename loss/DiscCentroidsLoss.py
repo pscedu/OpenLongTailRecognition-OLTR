@@ -5,7 +5,7 @@ from torch.autograd.function import Function
 import pdb
 
 class DiscCentroidsLoss(nn.Module):
-    def __init__(self, num_classes, feat_dim, size_average=True):
+    def __init__(self, num_classes=None, feat_dim=None, size_average=True):
         super(DiscCentroidsLoss, self).__init__()
         self.num_classes = num_classes
         self.centroids = nn.Parameter(torch.randn(num_classes, feat_dim))
@@ -25,8 +25,7 @@ class DiscCentroidsLoss(nn.Module):
 
         # To check the dim of centroids and features
         if feat.size(1) != self.feat_dim:
-            raise ValueError("Center's dim: {0} should be equal to input feature's \
-                            dim: {1}".format(self.feat_dim,feat.size(1)))
+            raise ValueError("Center's dim: {0} should be equal to input feature's dim: {1}".format(self.feat_dim, feat.size(1)))
         batch_size_tensor = feat.new_empty(1).fill_(batch_size if self.size_average else 1)
         loss_attract = self.disccentroidslossfunc(feat.clone(), label, self.centroids.clone(), batch_size_tensor).squeeze()
 
@@ -78,6 +77,8 @@ class DiscCentroidsLossFunc(Function):
 
 
     
-def create_loss (feat_dim=512, num_classes=1000):
+def create_loss (feat_dim=None, num_classes=None):
     print('Loading Discriminative Centroids Loss.')
-    return DiscCentroidsLoss(num_classes, feat_dim)
+    assert feat_dim is not None
+    assert num_classes is not None
+    return DiscCentroidsLoss(num_classes=num_classes, feat_dim=feat_dim)

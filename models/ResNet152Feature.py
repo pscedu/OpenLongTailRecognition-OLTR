@@ -6,7 +6,7 @@ def create_model(use_modulatedatt=False, use_fc=False, dropout=None, stage1_weig
                  weights_path=None):
     
     print('Loading Scratch ResNet 152 Feature Model.')
-    resnet152 = ResNet(Bottleneck, [3, 8, 36, 3], use_modulatedatt=use_modulatedatt, use_fc=use_fc, dropout=None)
+    resnet152 = ResNet(Bottleneck, [3, 8, 36, 3], use_modulatedatt=use_modulatedatt, use_fc=use_fc, dropout=None, fc_feat_dim=2048)
     
     if not test:
 

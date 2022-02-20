@@ -1,4 +1,3 @@
-# Testing configurations
 import os
 
 config = {}
@@ -6,12 +5,12 @@ config = {}
 training_opt = {}
 training_opt['dataset'] = 'stamps'
 training_opt['log_dir'] = None
-training_opt['num_classes'] = 'UNDEFINED'
+training_opt['num_classes'] = 'UNDEFINED_NUM_CLASSES'
 training_opt['batch_size'] = 128
 training_opt['num_workers'] = 0
 training_opt['num_epochs'] = 100
 training_opt['display_step'] = 10
-training_opt['feature_dim'] = 2048
+training_opt['feature_dim'] = 2048  # WARNING: 512 was replaced with 2048 to match init Caffe weights.
 training_opt['open_threshold'] = 0.01
 training_opt['sampler'] = None
 training_opt['scheduler_params'] = {'step_size': 1000, 'gamma': 0.1}
@@ -26,7 +25,7 @@ feature_param = {
     'dataset': training_opt['dataset'],
     'caffe': True
 }
-feature_optim_param = {'lr': 0.1, 'momentum': 0.1, 'weight_decay': 0}  #.0005}
+feature_optim_param = {'lr': 0.1, 'momentum': 0.1, 'weight_decay': 0.0005}
 networks['feat_model'] = {
     'def_file': './models/ResNet152Feature.py',
     'params': feature_param,
@@ -42,8 +41,7 @@ classifier_param = {
 classifier_optim_param = {
     'lr': 0.1,
     'momentum': 0.9,
-    'weight_decay': 0
-}  #0.0005}
+    'weight_decay': 0.0005}
 networks['classifier'] = {
     'def_file': './models/DotProductClassifier.py',
     'params': classifier_param,

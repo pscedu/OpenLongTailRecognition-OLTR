@@ -83,7 +83,8 @@ class Bottleneck(nn.Module):
 
 class ResNet(nn.Module):
 
-    def __init__(self, block, layers, use_modulatedatt=False, use_fc=False, dropout=None):
+    def __init__(self, block, layers, use_modulatedatt=False, use_fc=False, dropout=None, fc_feat_dim=None):
+        assert fc_feat_dim is not None
         self.inplanes = 64
         super(ResNet, self).__init__()
         self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3,
@@ -102,7 +103,7 @@ class ResNet(nn.Module):
 
         if self.use_fc:
             print('Using fc.')
-            self.fc_add = nn.Linear(512 * block.expansion, 512)
+            self.fc_add = nn.Linear(512 * block.expansion, fc_feat_dim)
 
         if self.use_dropout:
             print('Using dropout.')

@@ -1,6 +1,7 @@
 import os
 import copy
 import logging
+import shutil
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -31,10 +32,6 @@ class model ():
         self.memory = self.config['memory']
 
         self.init_models(test, init_weights_path)
-
-        # Has to be called by user in order to make logic more straightforward:
-        # this function has to be called during training, but not inference.
-        # self.init_models(weights_path)
 
     def init_models(self, test, init_weights_path):
         logging.info('Initializng models...')
@@ -115,21 +112,16 @@ class model ():
         # When training the network
         time.sleep(0.25)
 
-        # Initialize best model
-        best_model_weights = {}
-        best_model_weights['feat_model'] = copy.deepcopy(self.networks['feat_model'].state_dict())
-        best_model_weights['classifier'] = copy.deepcopy(self.networks['classifier'].state_dict())
-        best_acc = 0.0
-        best_epoch = 0
-
         end_epoch = self.training_opt['num_epochs']
         # Loop over epochs
         for epoch in range(1, end_epoch + 1):
             print('epoch: %d' % epoch)
 
+            # Eval disables training mode, so need to enable it again.
             for model in self.networks.values():
                 model.train()
                 model.cuda()
+            torch.set_grad_enabled(True)
 
             torch.cuda.empty_cache()
 
@@ -191,26 +183,14 @@ class model ():
                         self.criterion_optimizer.step()
 
             _, preds = torch.max(self.logits, 1)
-            epoch_accuracy = (preds == labels).sum().item() / len(labels)
-            print("Epoch-train-loss:'", epoch_loss.item(),
-                  " Epoch-train-accuracy:'", epoch_accuracy)
+            epoch_accuracy = (preds == labels).sum().item() / len(labels) * 100
+            print("Epoch-train-loss: %.2f" % epoch_loss.item(),
+                  " Epoch-train-accuracy: %.2f%%" % epoch_accuracy)
 
             # After every epoch, validation
-            res = self.eval(val_data)
+            acc = self.eval(val_data, is_train_phase=True)
 
-            # Under validation, the best model need to be updated
-            if res > best_acc:
-                best_epoch = copy.deepcopy(epoch)
-                best_acc = copy.deepcopy(res)
-                best_centroids = copy.deepcopy(self.centroids)
-                best_model_weights['feat_model'] = copy.deepcopy(self.networks['feat_model'].state_dict())
-                best_model_weights['classifier'] = copy.deepcopy(self.networks['classifier'].state_dict())
-                self.save_model(save_model_dir,
-                                epoch,
-                                best_epoch,
-                                best_model_weights,
-                                best_acc,
-                                centroids=best_centroids)
+            self.save_model(save_model_dir, epoch=epoch, acc=acc)
 
         print('Training Complete.')
         print('Done')
@@ -238,7 +218,7 @@ class model ():
             model.cuda()
         # # If on training phase, disable and later enable gradients
         # if is_train_phase:
-        #     torch.set_grad_enabled(False)
+        torch.set_grad_enabled(False)
 
         self.total_logits = torch.empty((0, self.training_opt['num_classes'])).to(self.device)
         self.total_labels = torch.empty(0, dtype=torch.long).to(self.device)
@@ -251,26 +231,20 @@ class model ():
 
             # In validation or testing
             self.features, _ = self.networks['feat_model'](inputs)
-            feature_ext = False
-            # If not just extracting features, calculate logits
-            if not feature_ext:
 
-                # During training, calculate centroids if needed to
-                if is_train_phase:
-                    if self.memory['use_centroids'] and 'FeatureLoss' in self.criterions.keys(
-                    ):
-                        self.centroids = self.criterions[
-                            'FeatureLoss'].centroids.data
-                    else:
-                        self.centroids = None
+            # During training, calculate centroids if needed to.
+            if is_train_phase:
+                if self.memory['use_centroids'] and 'FeatureLoss' in self.criterions.keys():
+                    self.centroids = self.criterions['FeatureLoss'].centroids.data
+                else:
+                    self.centroids = None
 
-                # Calculate logits with classifier
-                self.logits, self.direct_memory_feature = self.networks[
-                    'classifier'](self.features, self.centroids)
+            # Calculate logits with classifier
+            self.logits, self.direct_memory_feature = self.networks[
+                'classifier'](self.features, self.centroids)
 
-                self.total_logits = torch.cat((self.total_logits, self.logits))
-                self.total_labels = torch.cat((self.total_labels, labels))
-        #        self.total_paths = np.concatenate((self.total_paths, paths))
+            self.total_logits = torch.cat((self.total_logits, self.logits))
+            self.total_labels = torch.cat((self.total_labels, labels))
 
         _, pred = self.total_logits.topk(5, 1, True, True)
         pred = pred.t()
@@ -280,7 +254,7 @@ class model ():
 
         correct_k = correct[:5].reshape(-1).float().sum(0)
         res = (correct_k.mul_(100.0 / self.total_labels.size(0))).item()
-        print("Eval-Accuracy :", res)
+        print("Eval-Accuracy : %.2f%%" % res)
         return res
 
     def centroids_cal(self, data):
@@ -329,16 +303,13 @@ class model ():
 
         return centroids
 
-    def load_model(self, weights_path):
+    def load_model(self, checkpoint):
         '''
         Has to be called by user at the INFERENCE stage after the constructor.
         '''
-        print('Loading model from %s' % (weights_path))
-
-        checkpoint = torch.load(weights_path)
         model_state = checkpoint['state_dict_best']
 
-        if 'centroids' in checkpoint:
+        if 'centroids' in checkpoint and checkpoint['centroids'] is not None:
             print ('Found centroids in checkpoint.')
             self.centroids = checkpoint['centroids']
         else:
@@ -355,27 +326,28 @@ class model ():
             # model.load_state_dict(model_state[key])
             model.load_state_dict(weights)
 
-    def save_model(self,
-                   model_dir,
-                   epoch,
-                   best_epoch,
-                   best_model_weights,
-                   best_acc,
-                   centroids=None):
+    def save_model(self, model_dir, epoch, acc):
+
+        model_weights = {}
+        model_weights['feat_model'] = copy.deepcopy(self.networks['feat_model'].state_dict())
+        model_weights['classifier'] = copy.deepcopy(self.networks['classifier'].state_dict())
 
         model_states = {
+            'num_classes': self.training_opt['num_classes'],
             'epoch': epoch,
-            'best_epoch': best_epoch,
-            'state_dict_best': best_model_weights,
-            'best_acc': best_acc,
-            'centroids': centroids
+            'best_epoch': epoch,
+            'state_dict_best': model_weights,
+            'best_acc': acc,
+            'centroids': self.centroids
         }
 
         print('Saving model at: %s' % model_dir)
-        # TODO: probably need to save for every epoch.
-        model_path = os.path.join(model_dir, 'final_model_checkpoint.pth')
-
+        model_path = os.path.join(model_dir, 'epoch%03d.pth' % epoch)
         torch.save(model_states, model_path)
+        
+        # Needed for stage2 to know which file to load.
+        final_model_path = os.path.join(model_dir, 'final_model_checkpoint.pth')
+        shutil.copyfile(model_path, final_model_path)
 
     def output_logits(self, openset=False):
         filename = os.path.join(self.training_opt['log_dir'],

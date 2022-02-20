@@ -5,6 +5,7 @@ import logging
 import torch
 import pprint
 import shutil
+import simplejson as json
 from torchvision import transforms
 import progressbar
 
@@ -18,6 +19,7 @@ def get_parser():
                         default='config/stamps/stage_2_meta_embedding.py',
                         type=str)
     parser.add_argument('--shuffler_dir', required=True, type=str)
+    parser.add_argument('--encoding_file', required=True, type=str)
     parser.add_argument('--rootdir', required=True, type=str)
     parser.add_argument('--weights_dir', required=True, type=str)
     parser.add_argument('--in_db_file', required=True, type=str)
@@ -47,6 +49,22 @@ def inference(args):
     # TODO: change.
     relatin_opt = config['memory']
 
+    # Read the encoding, and pprepare the decoding table.
+    if not os.path.exists(args.encoding_file):
+        raise FileNotFoundError('Cant find the encoding file: %s' % args.encoding_file)
+    with open(args.encoding_file) as f:
+        encoding = json.load(f)
+    decoding = {}
+    for name, name_id in encoding.items():
+        if name_id == -1:
+            decoding[name_id] = None
+        elif name_id in decoding:
+            raise ValueError('Not expecting multiple back mapping.')
+        else:
+            decoding[name_id] = name
+    logging.info('Have %d entries in decoding.', len(decoding))
+
+
     transform = transforms.Compose([
         transforms.ToPILImage(),
         transforms.CenterCrop(224),
@@ -68,9 +86,16 @@ def inference(args):
                                              shuffle=False,
                                              num_workers=1)
 
+    # Need to load checkpoint here, because it stores info about num_classes.
     weights_path = os.path.join(args.weights_dir, 'final_model_checkpoint.pth')
+    print('Loading model from %s' % weights_path)
+    checkpoint = torch.load(weights_path)
+
+    num_classes = checkpoint['num_classes']
+    config['training_opt']['num_classes'] = num_classes
+    config['networks']['classifier']['params']['num_classes'] = num_classes
     model = run_networks.model(config, test=True)
-    model.load_model(weights_path)
+    model.load_model(checkpoint)
 
     objectids, preds, probs = model.infer(dataloader)
 
@@ -78,10 +103,13 @@ def inference(args):
     for objectid, pred, prob in progressbar.progressbar(zip(objectids, preds, probs)):
         # NOTE: Currently writing only top-1.
         objectid = int(objectid)
-        name_id = str(pred[0])
+        name_id = int(pred[0])
         score = float(prob[0])
-        print ('Setting name_id %03d with score %.3f to object %d' % (name_id, score, objectid))
-        dataset.execute('UPDATE objects SET name=?,score=? WHERE objectid=?', (name_id, score, objectid))
+        if name_id not in decoding:
+            raise ValueError('name_id %d not in decoding.')
+        name = decoding[name_id]
+        print ('Setting name_id %s (name_id %d) with score %.3f to object %d' % (name, name_id, score, objectid))
+        dataset.execute('UPDATE objects SET name=?,score=? WHERE objectid=?', (name, score, objectid))
     dataset.conn.commit()
     print('Found distinct names: ', dataset.execute('SELECT COUNT(DISTINCT(name)) FROM objects'))
     dataset.close()

@@ -4,7 +4,7 @@ from utils import *
 
 class DotProduct_Classifier(nn.Module):
     
-    def __init__(self, num_classes=1000, feat_dim=2048, **args):
+    def __init__(self, feat_dim=None, num_classes=None, **args):
         super(DotProduct_Classifier, self).__init__()
         self.fc = nn.Linear(feat_dim, num_classes)
         
@@ -12,11 +12,12 @@ class DotProduct_Classifier(nn.Module):
         x = self.fc(x)
         return x, None
     
-def create_model(in_dim=None, num_classes=1000, stage1_weights=False, dataset=None, test=False, 
+def create_model(in_dim=None, num_classes=None, stage1_weights=False, dataset=None, test=False, 
                  weights_path=None, **args):
     assert in_dim is not None
+    assert num_classes is not None
     print('Loading Dot Product Classifier.')
-    clf = DotProduct_Classifier(num_classes, in_dim)
+    clf = DotProduct_Classifier(feat_dim=in_dim, num_classes=num_classes)
 
     if not test:
         if stage1_weights:

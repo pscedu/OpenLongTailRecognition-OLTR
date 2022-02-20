@@ -6,7 +6,7 @@ def create_model(use_modulatedatt=False, use_fc=False, dropout=None, stage1_weig
                  weights_path=None, **args):
     
     print('Loading Scratch ResNet 10 Feature Model.')
-    resnet10 = ResNet(BasicBlock, [1, 1, 1, 1], use_modulatedatt=use_modulatedatt, use_fc=use_fc, dropout=None)
+    resnet10 = ResNet(BasicBlock, [1, 1, 1, 1], use_modulatedatt=use_modulatedatt, use_fc=use_fc, dropout=None, fc_feat_dim=512)
 
     if not test:
         if stage1_weights:
