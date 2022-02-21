@@ -135,26 +135,23 @@ class model ():
 
                 inputs = batch['image']
                 labels = batch['name_id']
-                objectids = batch['objectid']
 
                 inputs, labels = inputs.cuda(), labels.cuda()
 
-                with torch.set_grad_enabled(True):
+                with torch.set_grad_enabled(True):  # TODO: remove, done above.
 
-                    self.features, _ = self.networks['feat_model'](inputs)
-                    feature_ext = False
-                    if not feature_ext:
-                        # During training, calculate centroids if needed to
-                        if self.memory['use_centroids'] and 'FeatureLoss' in self.criterions.keys(
-                        ):
-                            self.centroids = self.criterions[
-                                'FeatureLoss'].centroids.data
-                        else:
-                            self.centroids = None
+                    features, _ = self.networks['feat_model'](inputs)
 
-                            # Calculate logits with classifier
-                        self.logits, self.direct_memory_feature = self.networks[
-                            'classifier'](self.features, self.centroids)
+                    # During training, calculate centroids if needed to
+                    if self.memory['use_centroids'] and 'FeatureLoss' in self.criterions.keys():
+                        self.centroids = self.criterions[
+                            'FeatureLoss'].centroids.data
+                    else:
+                        self.centroids = None
+
+                        # Calculate logits with classifier
+                    self.logits, self.direct_memory_feature = self.networks[
+                        'classifier'](features, self.centroids)
 
                     self.loss_perf = self.criterions['PerformanceLoss'](
                         self.logits,
@@ -166,7 +163,7 @@ class model ():
                     # Apply loss on features if set up
                     if 'FeatureLoss' in self.criterions.keys():
                         self.loss_feat = self.criterions['FeatureLoss'](
-                            self.features, labels)
+                            features, labels)
                         self.loss_feat = self.loss_feat * self.criterion_weights[
                             'FeatureLoss']
                         self.loss += self.loss_feat
@@ -225,12 +222,12 @@ class model ():
         self.total_paths = np.empty(0)
 
         # Iterate over dataset
-        for valid in progressbar.progressbar(data):
-            inputs = valid["image"].to(self.device)
-            labels = valid["name_id"].to(self.device)
+        for batch in progressbar.progressbar(data):
+            inputs = batch["image"].to(self.device)
+            labels = batch["name_id"].to(self.device)
 
             # In validation or testing
-            self.features, _ = self.networks['feat_model'](inputs)
+            features, _ = self.networks['feat_model'](inputs)
 
             # During training, calculate centroids if needed to.
             if is_train_phase:
@@ -241,7 +238,7 @@ class model ():
 
             # Calculate logits with classifier
             self.logits, self.direct_memory_feature = self.networks[
-                'classifier'](self.features, self.centroids)
+                'classifier'](features, self.centroids)
 
             self.total_logits = torch.cat((self.total_logits, self.logits))
             self.total_labels = torch.cat((self.total_labels, labels))
@@ -274,7 +271,7 @@ class model ():
                     self.device)
 
                 # Calculate Features of each training data
-                self.features, _ = self.networks['feat_model'](inputs)
+                features, _ = self.networks['feat_model'](inputs)
 
                 feature_ext = True
                 # If not just extracting features, calculate logits
@@ -291,12 +288,12 @@ class model ():
 
                     # Calculate logits with classifier
                     self.logits, self.direct_memory_feature = self.networks[
-                        'classifier'](self.features, self.centroids)
+                        'classifier'](features, self.centroids)
 
                 # Add all calculated features to center tensor
                 for i in range(len(labels)):
                     label = labels[i]
-                    centroids[label] += self.features[i]
+                    centroids[label] += features[i]
 
         # Average summed features with class count
         centroids /= torch.tensor(class_count(data)).float().unsqueeze(1).cuda()
