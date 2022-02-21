@@ -52,28 +52,39 @@ def train(args):
         print ('Init weights dir not provided.')
 
     # TODO: add random rotation.
-    train_transform = transforms.Compose([
+    train_image_transform = transforms.Compose([
         transforms.ToPILImage(),
         transforms.RandomResizedCrop(224),
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ])
-    val_transform = transforms.Compose([
+    val_image_transform = transforms.Compose([
         transforms.ToPILImage(),
         transforms.CenterCrop(224),
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ])
 
+    used_keys = ['imagefile', 'image', 'objectid', 'name_id',
+                 'x_on_page', 'width_on_page', 'y_on_page', 'height_on_page']
+    common_transform_group={
+            'name_id': lambda x: int(x),
+            'x_on_page': lambda x: float(x) if x is not None and x != 'None' else -1,
+            'y_on_page': lambda x: float(x) if x is not None and x != 'None' else -1,
+            'width_on_page': lambda x: float(x) if x is not None and x != 'None' else -1,
+            'height_on_page': lambda x: float(x) if x is not None and x != 'None' else -1,
+        }
+    train_transform_group = dict(common_transform_group)
+    train_transform_group.update({'image': train_image_transform})
+    val_transform_group = dict(common_transform_group)
+    val_transform_group.update({'image': val_image_transform})
+
     train_dataset = datasets.ObjectDataset(
         args.train_db_file,
         rootdir=args.rootdir,
         mode='r',
-        used_keys=['imagefile', 'image', 'objectid', 'name', 'name_id'],
-        transform_group={
-            'image': train_transform,
-            'name_id': lambda x: int(x)
-        })
+        used_keys=used_keys,
+        transform_group=train_transform_group)
     logging.info("Total number of train samples: %d", len(train_dataset))
 
     # Set num_classes everywhere.
@@ -98,11 +109,8 @@ def train(args):
         where_object="objectid IN "
                      "(SELECT objectid FROM properties WHERE key = 'name_id' AND value IN (%s))" % classes_ids_str,
         mode='r',
-        used_keys=['imagefile', 'image', 'objectid', 'name', 'name_id'],
-        transform_group={
-            'image': val_transform,
-            'name_id': lambda x: int(x)
-        })
+        used_keys=used_keys,
+        transform_group=val_transform_group)
     logging.info("Total number of val samples: %d", len(val_dataset))
 
     pprint.pprint(config)

@@ -52,11 +52,12 @@ class MetaEmbedding_Classifier(nn.Module):
         return logits, [direct_feature, infused_feature]
     
 def create_model(in_dim=None, num_classes=None, stage1_weights=False, dataset=None, test=False, 
-                 weights_path=None, **args):
-    print('Loading Meta Embedding Classifier.')
+                 weights_path=None, extra_in_dim=0, **args):
+    print('Loading Meta Embedding Classifier, extra_in_dim=%d' % extra_in_dim)
     assert in_dim is not None
     assert num_classes is not None
-    clf = MetaEmbedding_Classifier(feat_dim=in_dim, num_classes=num_classes)
+    # Add num_extra_input_features: feat_dim=in_dim+num_extra_input_features
+    clf = MetaEmbedding_Classifier(feat_dim=(in_dim + extra_in_dim), num_classes=num_classes)
 
     if not test:
         if stage1_weights:

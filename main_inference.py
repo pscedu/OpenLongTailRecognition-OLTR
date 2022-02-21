@@ -64,7 +64,6 @@ def inference(args):
             decoding[name_id] = name
     logging.info('Have %d entries in decoding.', len(decoding))
 
-
     transform = transforms.Compose([
         transforms.ToPILImage(),
         transforms.CenterCrop(224),
@@ -72,12 +71,14 @@ def inference(args):
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ])
 
-    shutil.copyfile(args.in_db_file, args.out_db_file)
+    used_keys = ['image', 'objectid',
+                 'x_on_page', 'width_on_page', 'y_on_page', 'height_on_page']
 
+    shutil.copyfile(args.in_db_file, args.out_db_file)
     dataset = datasets.ObjectDataset(args.out_db_file,
                                      rootdir=args.rootdir,
                                      mode='w',
-                                     used_keys=['image', 'objectid'],
+                                     used_keys=used_keys,
                                      transform_group={'image': transform},
                                      copy_to_memory=False)
 

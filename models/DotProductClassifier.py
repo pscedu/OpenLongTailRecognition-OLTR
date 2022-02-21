@@ -13,11 +13,11 @@ class DotProduct_Classifier(nn.Module):
         return x, None
     
 def create_model(in_dim=None, num_classes=None, stage1_weights=False, dataset=None, test=False, 
-                 weights_path=None, **args):
+                 weights_path=None, extra_in_dim=0, **args):
     assert in_dim is not None
     assert num_classes is not None
-    print('Loading Dot Product Classifier.')
-    clf = DotProduct_Classifier(feat_dim=in_dim, num_classes=num_classes)
+    print('Loading Dot Product Classifier, extra_in_dim=%d' % extra_in_dim)
+    clf = DotProduct_Classifier(feat_dim=(in_dim + extra_in_dim), num_classes=num_classes)
 
     if not test:
         if stage1_weights:

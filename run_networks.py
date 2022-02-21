@@ -16,6 +16,14 @@ import progressbar
 from utils import source_import
 
 
+def get_stamp_position(batch):              
+    stamp_position_np = np.stack((batch['x_on_page'],
+                                  batch['width_on_page'],
+                                  batch['y_on_page'],
+                                  batch['height_on_page']), axis=1).astype(np.float)
+    return torch.Tensor(stamp_position_np)
+
+
 class model ():
 
     TOP_N = 3
@@ -32,6 +40,13 @@ class model ():
         self.memory = self.config['memory']
 
         self.init_models(test, init_weights_path)
+    
+    def get_extra_dim(self):
+        if 'extra_in_dim' not in self.config['training_opt']:
+            logging.debug('extra_in_dim is not in training_opt.')
+            return 0
+        else:
+            return self.config['training_opt']['extra_in_dim']
 
     def init_models(self, test, init_weights_path):
         logging.info('Initializng models...')
@@ -47,7 +62,8 @@ class model ():
             def_file = val['def_file']
             print ("val['params']", val['params'])
 
-            self.networks[key] = source_import(def_file).create_model(weights_path=init_weights_path, test=test, **val['params'])
+            self.networks[key] = source_import(def_file).create_model(
+                weights_path=init_weights_path, test=test, **val['params'])
             self.networks[key] = nn.DataParallel(self.networks[key]).to(self.device)
 
             if 'fix' in val and val['fix']:
@@ -133,14 +149,16 @@ class model ():
                 # if step == self.epoch_steps:
                 #     break
 
-                inputs = batch['image']
-                labels = batch['name_id']
-
-                inputs, labels = inputs.cuda(), labels.cuda()
+                inputs = batch['image'].cuda()
+                labels = batch['name_id'].cuda()
 
                 with torch.set_grad_enabled(True):  # TODO: remove, done above.
 
                     features, _ = self.networks['feat_model'](inputs)
+                    # Add info about stamp position on its page.
+                    if self.get_extra_dim():
+                        stamp_position = get_stamp_position(batch).cuda()
+                        features = torch.cat((features, stamp_position), dim=1)
 
                     # During training, calculate centroids if needed to
                     if self.memory['use_centroids'] and 'FeatureLoss' in self.criterions.keys():
@@ -154,18 +172,15 @@ class model ():
                         'classifier'](features, self.centroids)
 
                     self.loss_perf = self.criterions['PerformanceLoss'](
-                        self.logits,
-                        labels) * self.criterion_weights['PerformanceLoss']
+                        self.logits, labels) * self.criterion_weights['PerformanceLoss']
 
                     # Add performance loss to total loss
                     self.loss = self.loss_perf
 
                     # Apply loss on features if set up
                     if 'FeatureLoss' in self.criterions.keys():
-                        self.loss_feat = self.criterions['FeatureLoss'](
-                            features, labels)
-                        self.loss_feat = self.loss_feat * self.criterion_weights[
-                            'FeatureLoss']
+                        self.loss_feat = self.criterions['FeatureLoss'](features, labels)
+                        self.loss_feat = self.loss_feat * self.criterion_weights['FeatureLoss']
                         self.loss += self.loss_feat
 
                     epoch_loss = epoch_loss + self.loss
@@ -228,6 +243,10 @@ class model ():
 
             # In validation or testing
             features, _ = self.networks['feat_model'](inputs)
+            # Add info about stamp position on its page.
+            if self.get_extra_dim():
+                stamp_position = get_stamp_position(batch).to(self.device)
+                features = torch.cat((features, stamp_position), dim=1)
 
             # During training, calculate centroids if needed to.
             if is_train_phase:
@@ -257,7 +276,7 @@ class model ():
     def centroids_cal(self, data):
 
         centroids = torch.zeros(self.training_opt['num_classes'],
-                                self.training_opt['feature_dim']).cuda()
+                                self.training_opt['feature_dim'] + self.get_extra_dim()).cuda()
 
         print('Calculating centroids.')
 
@@ -266,12 +285,16 @@ class model ():
 
         with torch.set_grad_enabled(False):
 
-            for p in progressbar.progressbar(data):
-                inputs, labels = p["image"].to(self.device), p["name_id"].to(
-                    self.device)
+            for batch in progressbar.progressbar(data):
+                inputs = batch["image"].to(self.device)
+                labels = batch["name_id"].to(self.device)
 
                 # Calculate Features of each training data
                 features, _ = self.networks['feat_model'](inputs)
+                # Add info about stamp position on its page.
+                if self.get_extra_dim():
+                    stamp_position = get_stamp_position(batch).to(self.device)
+                    features = torch.cat((features, stamp_position), dim=1)
 
                 feature_ext = True
                 # If not just extracting features, calculate logits
@@ -279,10 +302,8 @@ class model ():
 
                     # During training, calculate centroids if needed to
                     if not self.test_mode:
-                        if centroids and 'FeatureLoss' in self.criterions.keys(
-                        ):
-                            self.centroids = self.criterions[
-                                'FeatureLoss'].centroids.data
+                        if centroids and 'FeatureLoss' in self.criterions.keys():
+                            self.centroids = self.criterions['FeatureLoss'].centroids.data
                         else:
                             self.centroids = None
 
@@ -381,6 +402,11 @@ class model ():
 
             # In validation or testing
             features, _ = self.networks['feat_model'](inputs)
+            # Add info about stamp position on its page.
+            if self.get_extra_dim():
+                stamp_position = get_stamp_position(batch).to(self.device)
+                features = torch.cat((features, stamp_position), dim=1)
+
             logits, _ = self.networks['classifier'](features, self.centroids)
             #self.total_logits = torch.cat((self.total_logits, self.logits))
 
