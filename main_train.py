@@ -69,7 +69,7 @@ def train(args):
         args.train_db_file,
         rootdir=args.rootdir,
         mode='r',
-        used_keys=['image', 'objectid', 'name', 'name_id'],
+        used_keys=['imagefile', 'image', 'objectid', 'name', 'name_id'],
         transform_group={
             'image': train_transform,
             'name_id': lambda x: int(x)
@@ -98,7 +98,7 @@ def train(args):
         where_object="objectid IN "
                      "(SELECT objectid FROM properties WHERE key = 'name_id' AND value IN (%s))" % classes_ids_str,
         mode='r',
-        used_keys=['image', 'objectid', 'name', 'name_id'],
+        used_keys=['imagefile', 'image', 'objectid', 'name', 'name_id'],
         transform_group={
             'image': val_transform,
             'name_id': lambda x: int(x)
