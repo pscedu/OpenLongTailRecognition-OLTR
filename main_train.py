@@ -3,9 +3,11 @@ import sys
 import argparse
 import pprint
 import logging
-import numpy as np
 import torch
+import cv2
 from torchvision import transforms
+import albumentations as A
+from albumentations.pytorch.transforms import ToTensorV2
 
 import run_networks
 import utils
@@ -51,13 +53,25 @@ def train(args):
         weights_path = None
         print ('Init weights dir not provided.')
 
-    # TODO: add random rotation.
-    train_image_transform = transforms.Compose([
-        transforms.ToPILImage(),
-        transforms.RandomResizedCrop(224),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+    albumentation_tranform = A.Compose([
+        A.CLAHE(),
+        A.ShiftScaleRotate(shift_limit=0.1,
+                           scale_limit=(0, 0.35),
+                           rotate_limit=20,
+                           p=1.,
+                           border_mode=cv2.BORDER_REPLICATE),
+        A.Blur(blur_limit=3),
+        A.OpticalDistortion(),
+        A.GridDistortion(),
+        A.Resize(224, 224),
+        A.HueSaturationValue(),
+        A.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225],
+        ),
+        ToTensorV2(),
     ])
+    train_image_transform = lambda x: albumentation_tranform(image=x)['image']
     val_image_transform = transforms.Compose([
         transforms.ToPILImage(),
         transforms.CenterCrop(224),
