@@ -6,12 +6,13 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
+import torchvision
 from utils import *
 import time
 import numpy as np
-np.set_printoptions(threshold=np.inf)
-import json
+np.set_printoptions(threshold=np.inf, linewidth=300)
 import progressbar
+import wandb
 
 from utils import source_import
 
@@ -38,6 +39,9 @@ class model ():
         self.config = config
         self.training_opt = self.config['training_opt']
         self.memory = self.config['memory']
+
+        self.name_encoding = None
+        self.names_of_interest = None
 
         self.init_models(test, init_weights_path)
     
@@ -112,6 +116,17 @@ class model ():
                                               gamma=self.scheduler_params['gamma'])
         return optimizer, scheduler
 
+    def set_names_of_interest(self, names_of_interest):
+        '''
+        Set class names of interest for logging purposes.
+        Since the names tail can be long, we cant log any distributions for all
+        names (that won't display well). The user has to decide which names
+        they are interested in.
+        '''
+        self.names_of_interest = names_of_interest
+        # Get a list of name_ids from self.name_encoding = {name : name_id}.
+        self.name_ids = [self.name_encoding[x] for x in self.names_of_interest]
+
     def train(self, training_data, val_data, save_model_dir):
         self.test_mode = False
 
@@ -128,10 +143,16 @@ class model ():
         # When training the network
         time.sleep(0.25)
 
+        # Original eval before training, should show noise.
+        self.eval(val_data, is_train_phase=True)
+
         end_epoch = self.training_opt['num_epochs']
         # Loop over epochs
         for epoch in range(1, end_epoch + 1):
             print('epoch: %d' % epoch)
+
+            total_logits = torch.empty((0, self.training_opt['num_classes'])).to(self.device)
+            total_labels = torch.empty(0, dtype=torch.long).to(self.device)
 
             # Eval disables training mode, so need to enable it again.
             for model in self.networks.values():
@@ -143,11 +164,16 @@ class model ():
 
             # Iterate over dataset
             epoch_loss = 0.0
-            for batch in progressbar.progressbar(training_data):
+            for ibatch,batch in progressbar.progressbar(enumerate(training_data)):
 
                 # Break when step equal to epoch step
                 # if step == self.epoch_steps:
                 #     break
+
+                if (ibatch % 10 == 0):
+                    image_grid = make_grid_with_labels(
+                            tensor=batch['image'], labels=batch['name'], limit=32, nrow=8)
+                    wandb.log({"Training images.": wandb.Image(image_grid)})
 
                 inputs = batch['image'].cuda()
                 labels = batch['name_id'].cuda()
@@ -162,17 +188,16 @@ class model ():
 
                     # During training, calculate centroids if needed to
                     if self.memory['use_centroids'] and 'FeatureLoss' in self.criterions.keys():
-                        self.centroids = self.criterions[
-                            'FeatureLoss'].centroids.data
+                        self.centroids = self.criterions['FeatureLoss'].centroids.data
                     else:
                         self.centroids = None
 
-                        # Calculate logits with classifier
-                    self.logits, self.direct_memory_feature = self.networks[
+                    # Calculate logits with classifier
+                    logits, self.direct_memory_feature = self.networks[
                         'classifier'](features, self.centroids)
 
                     self.loss_perf = self.criterions['PerformanceLoss'](
-                        self.logits, labels) * self.criterion_weights['PerformanceLoss']
+                        logits, labels) * self.criterion_weights['PerformanceLoss']
 
                     # Add performance loss to total loss
                     self.loss = self.loss_perf
@@ -193,12 +218,26 @@ class model ():
                     self.model_optimizer.step()
                     if self.criterion_optimizer:
                         self.criterion_optimizer.step()
+                    
+                    wandb.log({"epoch": epoch, "loss": self.loss})
 
-            _, preds = torch.max(self.logits, 1)
-            epoch_accuracy = (preds == labels).sum().item() / len(labels) * 100
-            print("Epoch-train-loss: %.2f" % epoch_loss.item(),
-                  " Epoch-train-accuracy: %.2f%%" % epoch_accuracy)
+                    total_logits = torch.cat((total_logits, logits))
+                    total_labels = torch.cat((total_labels, labels))
 
+            accuracy_top1 = top_k_accuracy(total_logits, total_labels, 1)
+            accuracy_top5 = top_k_accuracy(total_logits, total_labels, 5)
+            print("Epoch-train-loss: %.2f," % epoch_loss.item(),
+                  " Epoch-train-accuracy-top1: %.2f%%," % accuracy_top1,
+                  " Epoch-train-accuracy-top5: %.2f%%" % accuracy_top5)
+            wandb.log({"train-accuracy-top1": accuracy_top1,
+                       "train-accuracy-top5": accuracy_top5})
+
+            # TP, FP, FN for self.names_of_interest.
+            # print ('epoch %d, training num_points: %d' % epoch, len(total_labels))
+            tp_fp_fn_chart = build_tp_fp_fn_wandb_chart(
+                total_logits, total_labels, self.name_ids, self.names_of_interest)
+            wandb.log({"Train TP/FP/FN": tp_fp_fn_chart})
+        
             # After every epoch, validation
             acc = self.eval(val_data, is_train_phase=True)
 
@@ -232,9 +271,15 @@ class model ():
         # if is_train_phase:
         torch.set_grad_enabled(False)
 
-        self.total_logits = torch.empty((0, self.training_opt['num_classes'])).to(self.device)
-        self.total_labels = torch.empty(0, dtype=torch.long).to(self.device)
+        total_logits = torch.empty((0, self.training_opt['num_classes'])).to(self.device)
+        total_labels = torch.empty(0, dtype=torch.long).to(self.device)
         self.total_paths = np.empty(0)
+
+        for batch in data:
+            image_grid = make_grid_with_labels(
+                    tensor=batch['image'], labels=batch['name'], limit=32, nrow=8)
+            wandb.log({"Eval images.": wandb.Image(image_grid)})
+            break
 
         # Iterate over dataset
         for batch in progressbar.progressbar(data):
@@ -256,22 +301,37 @@ class model ():
                     self.centroids = None
 
             # Calculate logits with classifier
-            self.logits, self.direct_memory_feature = self.networks[
+            logits, self.direct_memory_feature = self.networks[
                 'classifier'](features, self.centroids)
 
-            self.total_logits = torch.cat((self.total_logits, self.logits))
-            self.total_labels = torch.cat((self.total_labels, labels))
+            total_logits = torch.cat((total_logits, logits))
+            total_labels = torch.cat((total_labels, labels))
 
-        _, pred = self.total_logits.topk(5, 1, True, True)
-        pred = pred.t()
-        correct = pred.eq(self.total_labels.view(1, -1).expand_as(pred))
+        # Confusion matrix for self.names_of_interest.
+        logits = total_logits.to("cpu").numpy()
+        labels = total_labels.to("cpu").numpy()
+        sample_ids = np.isin(labels, self.name_ids)
+        labels = labels[sample_ids]  # Filter non-interesting GT samples.
+        labels = np.array([self.name_ids.index(x) for x in labels])  # Relabel GT.
+        logits = logits[sample_ids, :]  # Filter non-interesting GT samples.
+        logits = logits[:, self.name_ids]  # Remove predictions of non-interesting classes.
+        wandb.log({'confusion_matrix': wandb.plot.confusion_matrix(
+            probs=logits, y_true=labels, class_names=self.names_of_interest)})
 
-        #print(correct.shape)
+        # TP, FP, FN for self.names_of_interest.
+        # print ('eval num_points: %d' % len(total_labels))
+        tp_fp_fn_chart = build_tp_fp_fn_wandb_chart(
+            total_logits, total_labels, self.name_ids, self.names_of_interest)
+        wandb.log({"Eval TP/FP/FN": tp_fp_fn_chart})
+        
+        accuracy_top1 = top_k_accuracy(total_logits, total_labels, 1)
+        accuracy_top5 = top_k_accuracy(total_logits, total_labels, 5)
+        print("Eval-Accuracy top1 : %.2f%%, " % accuracy_top1,
+              " Eval-Accuracy top5 : %.2f%%" % accuracy_top5)
+        wandb.log({"eval-accuracy-top1": accuracy_top1,
+                   "eval-accuracy-top5": accuracy_top5})
 
-        correct_k = correct[:5].reshape(-1).float().sum(0)
-        res = (correct_k.mul_(100.0 / self.total_labels.size(0))).item()
-        print("Eval-Accuracy : %.2f%%" % res)
-        return res
+        return accuracy_top1
 
     def centroids_cal(self, data):
 
@@ -308,7 +368,7 @@ class model ():
                             self.centroids = None
 
                     # Calculate logits with classifier
-                    self.logits, self.direct_memory_feature = self.networks[
+                    _, self.direct_memory_feature = self.networks[
                         'classifier'](features, self.centroids)
 
                 # Add all calculated features to center tensor
@@ -367,14 +427,14 @@ class model ():
         final_model_path = os.path.join(model_dir, 'final_model_checkpoint.pth')
         shutil.copyfile(model_path, final_model_path)
 
-    def output_logits(self, openset=False):
-        filename = os.path.join(self.training_opt['log_dir'],
-                                'logits_%s' % ('open' if openset else 'close'))
-        print("Saving total logits to: %s.npz" % filename)
-        np.savez(filename,
-                 logits=self.total_logits.detach().cpu().numpy(),
-                 labels=self.total_labels.detach().cpu().numpy(),
-                 paths=self.total_paths)
+    # def output_logits(self, openset=False):
+    #     filename = os.path.join(self.training_opt['log_dir'],
+    #                             'logits_%s' % ('open' if openset else 'close'))
+    #     print("Saving total logits to: %s.npz" % filename)
+    #     np.savez(filename,
+    #              logits=self.total_logits.detach().cpu().numpy(),
+    #              labels=self.total_labels.detach().cpu().numpy(),
+    #              paths=self.total_paths)
 
     def infer(self, unlabeled_data):
         time.sleep(0.25)

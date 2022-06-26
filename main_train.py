@@ -8,6 +8,8 @@ import cv2
 from torchvision import transforms
 import albumentations as A
 from albumentations.pytorch.transforms import ToTensorV2
+import simplejson as json
+import wandb
 
 import run_networks
 import utils
@@ -20,6 +22,8 @@ def get_parser():
     parser.add_argument('--rootdir', required=True, type=str)
     parser.add_argument('--train_db_file', required=True, type=str)
     parser.add_argument('--val_db_file', required=True, type=str)
+    parser.add_argument('--encoding_file', required=True,
+                        help='A json with name encodings, used for logging.')
     parser.add_argument('--init_weights_dir', type=str,
                         help='Load weight from here. Required only for stage 2.')
     parser.add_argument('--output_dir', required=True, type=str)
@@ -29,6 +33,8 @@ def get_parser():
         choices=[10, 20, 30, 40],
         default=20,
         help="Set logging level. 10: debug, 20: info, 30: warning, 40: error.")
+    parser.add_argument('--wandb_mode', 
+        choices=['online', 'offline', 'disabled'], default='online')
     return parser
 
 
@@ -60,7 +66,7 @@ def train(args):
                            rotate_limit=20,
                            p=1.,
                            border_mode=cv2.BORDER_REPLICATE),
-        A.Blur(blur_limit=3),
+        A.Blur(blur_limit=1),
         A.OpticalDistortion(),
         A.GridDistortion(),
         A.Resize(224, 224),
@@ -79,7 +85,7 @@ def train(args):
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ])
 
-    used_keys = ['imagefile', 'image', 'objectid', 'name_id',
+    used_keys = ['imagefile', 'image', 'objectid', 'name_id', 'name',
                  'x_on_page', 'width_on_page', 'y_on_page', 'height_on_page']
     common_transform_group={
             'name_id': lambda x: int(x),
@@ -143,6 +149,30 @@ def train(args):
         num_workers=config['training_opt']['num_workers'])
 
     logging.info('Created dataloaders.')
+
+    with open(args.encoding_file, 'r') as f:
+        encoding = json.loads(f.read())
+    model.name_encoding = encoding
+
+    wandb.init(project="stamps", entity="etoropov", config=config, name='test2',
+               mode=args.wandb_mode)
+
+    # Log histogram of name_ids, in both train and test.
+    popular_names_sql = ("SELECT name FROM objects WHERE name IN ("
+                           "SELECT name FROM objects WHERE name NOT LIKE '%%page%%' "
+                           "GROUP BY name ORDER BY COUNT(1) DESC LIMIT 10)")
+    popular_train_names = [(x, "train") for x, in train_dataset.execute(popular_names_sql)]
+    popular_val_names   = [(x, "val") for x, in val_dataset.execute(popular_names_sql)]
+    popular_names = popular_train_names + popular_val_names
+    popular_names_table = wandb.Table(data=popular_names, columns=['class_name', 'subset'])
+    # wandb.log({'gt_names': wandb.plot.scatter(
+    #     names_table, x='class_name', y='subset', title="Distribution of names.")})
+    names_chart = wandb.plot_table(vega_spec_name="etoropov/gt_histogram",
+                data_table=popular_names_table,
+                fields={"x": "class_name", "y": "subset"})
+    wandb.log({"names_chart": names_chart})
+    model.set_names_of_interest([x[0] for x in list(set(popular_names))])
+    print (model.set_names_of_interest)
 
     model.train(train_dataloader, val_dataloader, save_model_dir)
 
