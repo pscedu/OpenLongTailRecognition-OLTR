@@ -43,6 +43,8 @@ class model ():
         self.name_encoding = None
         self.names_of_interest = None
 
+        self.centroids = None
+
         self.init_models(test, init_weights_path)
     
     def get_extra_dim(self):
@@ -127,8 +129,17 @@ class model ():
         # Get a list of name_ids from self.name_encoding = {name : name_id}.
         self.name_ids = [self.name_encoding[x] for x in self.names_of_interest]
 
+    def batch_forward (self, batch):
+        inputs = batch["image"].to(self.device)
+        features, _ = self.networks['feat_model'](inputs)
+        if self.get_extra_dim():
+            stamp_position = get_stamp_position(batch).to(self.device)
+            features = torch.cat((features, stamp_position), dim=1)
+
+        logits, _ = self.networks['classifier'](features, self.centroids)
+        return features, logits
+
     def train(self, training_data, val_data, save_model_dir):
-        self.test_mode = False
 
         # Initialize model optimizer and scheduler
         print('Initializing model optimizer.')
@@ -137,14 +148,14 @@ class model ():
             self.model_optim_params_list)
         self.init_criterions()
         if self.memory['init_centroids']:
-            self.criterions['FeatureLoss'].centroids.data = \
-                self.centroids_cal(training_data)
+            self.centroids = self.centroids_cal(training_data)
+            self.criterions['FeatureLoss'].centroids.data = self.centroids
 
         # When training the network
         time.sleep(0.25)
 
         # Original eval before training, should show noise.
-        self.eval(val_data, is_train_phase=True)
+        self.eval(val_data)
 
         end_epoch = self.training_opt['num_epochs']
         # Loop over epochs
@@ -172,49 +183,39 @@ class model ():
                                 tensor=batch['image'], labels=batch['name'], limit=32, nrow=8)
                         wandb.log({"Training images.": wandb.Image(image_grid)})
 
-                    inputs = batch['image'].to(self.device)
-                    labels = batch['name_id'].to(self.device)
-
-                    features, _ = self.networks['feat_model'](inputs)
-                    # Add info about stamp position on its page.
-                    if self.get_extra_dim():
-                        stamp_position = get_stamp_position(batch).cuda()
-                        features = torch.cat((features, stamp_position), dim=1)
-
                     # During training, calculate centroids if needed to
                     if self.memory['use_centroids'] and 'FeatureLoss' in self.criterions.keys():
                         self.centroids = self.criterions['FeatureLoss'].centroids.data
                     else:
                         self.centroids = None
 
-                    # Calculate logits with classifier
-                    logits, self.direct_memory_feature = self.networks[
-                        'classifier'](features, self.centroids)
+                    features, logits = self.batch_forward(batch)
 
-                    self.loss_perf = self.criterions['PerformanceLoss'](
+                    labels = batch['name_id'].to(self.device)
+                    loss_perf = self.criterions['PerformanceLoss'](
                         logits, labels) * self.criterion_weights['PerformanceLoss']
 
                     # Add performance loss to total loss
-                    self.loss = self.loss_perf
+                    loss = loss_perf
 
                     # Apply loss on features if set up
                     if 'FeatureLoss' in self.criterions.keys():
-                        self.loss_feat = self.criterions['FeatureLoss'](features, labels)
-                        self.loss_feat = self.loss_feat * self.criterion_weights['FeatureLoss']
-                        self.loss += self.loss_feat
+                        loss_feat = self.criterions['FeatureLoss'](features, labels)
+                        loss_feat = loss_feat * self.criterion_weights['FeatureLoss']
+                        loss += loss_feat
 
-                    epoch_loss = epoch_loss + self.loss
+                    epoch_loss = epoch_loss + loss
 
                     self.model_optimizer.zero_grad()
                     if self.criterion_optimizer:
                         self.criterion_optimizer.zero_grad()
                     # Back-propagation from loss outputs
-                    self.loss.backward()
+                    loss.backward()
                     self.model_optimizer.step()
                     if self.criterion_optimizer:
                         self.criterion_optimizer.step()
                     
-                    wandb.log({"epoch": epoch, "loss": self.loss})
+                    wandb.log({"epoch": epoch, "loss": loss})
 
                     total_logits = torch.cat((total_logits, logits))
                     total_labels = torch.cat((total_labels, labels))
@@ -234,22 +235,18 @@ class model ():
             wandb.log({"Train TP/FP/FN": tp_fp_fn_chart})
         
             # After every epoch, validation
-            acc = self.eval(val_data, is_train_phase=True)
+            acc = self.eval(val_data)
 
             self.save_model(save_model_dir, epoch=epoch, acc=acc)
 
         print('Training Complete.')
         print('Done')
 
-    def eval(self, data, is_train_phase, openset=False):
+    def eval(self, data, openset=False):
         '''
         Evaluate the loaded model on the provided data. 
         This function is called after each epoch at training.
-        Args:
-          is_train_phase:   bool
         '''
-        self.test_mode = False
-
         time.sleep(0.25)
 
         if openset:
@@ -267,7 +264,6 @@ class model ():
 
             total_logits = torch.empty((0, self.training_opt['num_classes'])).to(self.device)
             total_labels = torch.empty(0, dtype=torch.long).to(self.device)
-            self.total_paths = np.empty(0)
 
             for batch in data:
                 image_grid = make_grid_with_labels(
@@ -277,27 +273,9 @@ class model ():
 
             # Iterate over dataset
             for batch in progressbar.progressbar(data):
-                inputs = batch["image"].to(self.device)
+                _, logits = self.batch_forward(batch)
+
                 labels = batch["name_id"].to(self.device)
-
-                # In validation or testing
-                features, _ = self.networks['feat_model'](inputs)
-                # Add info about stamp position on its page.
-                if self.get_extra_dim():
-                    stamp_position = get_stamp_position(batch).to(self.device)
-                    features = torch.cat((features, stamp_position), dim=1)
-
-                # During training, calculate centroids if needed to.
-                if is_train_phase:
-                    if self.memory['use_centroids'] and 'FeatureLoss' in self.criterions.keys():
-                        self.centroids = self.criterions['FeatureLoss'].centroids.data
-                    else:
-                        self.centroids = None
-
-                # Calculate logits with classifier
-                logits, self.direct_memory_feature = self.networks[
-                    'classifier'](features, self.centroids)
-
                 total_logits = torch.cat((total_logits, logits))
                 total_labels = torch.cat((total_labels, labels))
 
@@ -350,21 +328,6 @@ class model ():
                 if self.get_extra_dim():
                     stamp_position = get_stamp_position(batch).to(self.device)
                     features = torch.cat((features, stamp_position), dim=1)
-
-                feature_ext = True
-                # If not just extracting features, calculate logits
-                if not feature_ext:
-
-                    # During training, calculate centroids if needed to
-                    if not self.test_mode:
-                        if centroids and 'FeatureLoss' in self.criterions.keys():
-                            self.centroids = self.criterions['FeatureLoss'].centroids.data
-                        else:
-                            self.centroids = None
-
-                    # Calculate logits with classifier
-                    _, self.direct_memory_feature = self.networks[
-                        'classifier'](features, self.centroids)
 
                 # Add all calculated features to center tensor
                 for i in range(len(labels)):
@@ -451,23 +414,11 @@ class model ():
             for batch in progressbar.progressbar(unlabeled_data):
                 if batch is None:
                     assert 0, 'How did this happen?'
-                inputs = batch["image"].to(self.device)
                 object_ids = batch['objectid'].cpu().numpy()
-                # TODO: is it needed?
-                # inputs = Variable(inputs)
 
-                # In validation or testing
-                features, _ = self.networks['feat_model'](inputs)
-                # Add info about stamp position on its page.
-                if self.get_extra_dim():
-                    stamp_position = get_stamp_position(batch).to(self.device)
-                    features = torch.cat((features, stamp_position), dim=1)
+                _, logits = self.batch_forward(batch)
 
-                logits, _ = self.networks['classifier'](features, self.centroids)
-                #self.total_logits = torch.cat((self.total_logits, self.logits))
-
-                probs, preds = F.softmax(logits.detach(), dim=1).topk(k=3,
-                                                                        dim=1)
+                probs, preds = F.softmax(logits.detach(), dim=1).topk(k=3, dim=1)
 
                 probs = probs.cpu().numpy()
                 preds = preds.cpu().numpy()
