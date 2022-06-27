@@ -187,7 +187,6 @@ def build_tp_fp_fn_wandb_chart(logits, labels, name_ids, names):
     fp_entries = [(x, name, 'fp') for x, name in zip(fp, names)]
     fn_entries = [(x, name, 'fn') for x, name in zip(fn, names)]
     entries = tp_entries + fp_entries + fn_entries
-    print ('build_tp_fp_fn_wandb_chart', len(entries))
     tp_fp_fn_table = wandb.Table(data=entries, columns=['quantity', 'class_name', 'variety'])
     tp_fp_fn_chart = wandb.plot_table(vega_spec_name="etoropov/tf_fp_fn",
         data_table=tp_fp_fn_table,

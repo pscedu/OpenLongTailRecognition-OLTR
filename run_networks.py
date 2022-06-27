@@ -157,28 +157,23 @@ class model ():
             # Eval disables training mode, so need to enable it again.
             for model in self.networks.values():
                 model.train()
-                model.cuda()
-            torch.set_grad_enabled(True)
-
+                model.to(self.device)
+                
             torch.cuda.empty_cache()
 
-            # Iterate over dataset
-            epoch_loss = 0.0
-            for ibatch,batch in progressbar.progressbar(enumerate(training_data)):
+            with torch.set_grad_enabled(True):
 
-                # Break when step equal to epoch step
-                # if step == self.epoch_steps:
-                #     break
+                # Iterate over dataset
+                epoch_loss = 0.0
+                for ibatch,batch in progressbar.progressbar(enumerate(training_data)):
 
-                if (ibatch % 10 == 0):
-                    image_grid = make_grid_with_labels(
-                            tensor=batch['image'], labels=batch['name'], limit=32, nrow=8)
-                    wandb.log({"Training images.": wandb.Image(image_grid)})
+                    if (ibatch % 10 == 0):
+                        image_grid = make_grid_with_labels(
+                                tensor=batch['image'], labels=batch['name'], limit=32, nrow=8)
+                        wandb.log({"Training images.": wandb.Image(image_grid)})
 
-                inputs = batch['image'].cuda()
-                labels = batch['name_id'].cuda()
-
-                with torch.set_grad_enabled(True):  # TODO: remove, done above.
+                    inputs = batch['image'].to(self.device)
+                    labels = batch['name_id'].to(self.device)
 
                     features, _ = self.networks['feat_model'](inputs)
                     # Add info about stamp position on its page.
@@ -266,77 +261,77 @@ class model ():
         # In validation or testing mode, set model to eval() and initialize running loss/correct
         for model in self.networks.values():
             model.eval()
-            model.cuda()
-        # # If on training phase, disable and later enable gradients
-        # if is_train_phase:
-        torch.set_grad_enabled(False)
+            model.to(self.device)
 
-        total_logits = torch.empty((0, self.training_opt['num_classes'])).to(self.device)
-        total_labels = torch.empty(0, dtype=torch.long).to(self.device)
-        self.total_paths = np.empty(0)
+        with torch.set_grad_enabled(False):
 
-        for batch in data:
-            image_grid = make_grid_with_labels(
-                    tensor=batch['image'], labels=batch['name'], limit=32, nrow=8)
-            wandb.log({"Eval images.": wandb.Image(image_grid)})
-            break
+            total_logits = torch.empty((0, self.training_opt['num_classes'])).to(self.device)
+            total_labels = torch.empty(0, dtype=torch.long).to(self.device)
+            self.total_paths = np.empty(0)
 
-        # Iterate over dataset
-        for batch in progressbar.progressbar(data):
-            inputs = batch["image"].to(self.device)
-            labels = batch["name_id"].to(self.device)
+            for batch in data:
+                image_grid = make_grid_with_labels(
+                        tensor=batch['image'], labels=batch['name'], limit=32, nrow=8)
+                wandb.log({"Eval images.": wandb.Image(image_grid)})
+                break
 
-            # In validation or testing
-            features, _ = self.networks['feat_model'](inputs)
-            # Add info about stamp position on its page.
-            if self.get_extra_dim():
-                stamp_position = get_stamp_position(batch).to(self.device)
-                features = torch.cat((features, stamp_position), dim=1)
+            # Iterate over dataset
+            for batch in progressbar.progressbar(data):
+                inputs = batch["image"].to(self.device)
+                labels = batch["name_id"].to(self.device)
 
-            # During training, calculate centroids if needed to.
-            if is_train_phase:
-                if self.memory['use_centroids'] and 'FeatureLoss' in self.criterions.keys():
-                    self.centroids = self.criterions['FeatureLoss'].centroids.data
-                else:
-                    self.centroids = None
+                # In validation or testing
+                features, _ = self.networks['feat_model'](inputs)
+                # Add info about stamp position on its page.
+                if self.get_extra_dim():
+                    stamp_position = get_stamp_position(batch).to(self.device)
+                    features = torch.cat((features, stamp_position), dim=1)
 
-            # Calculate logits with classifier
-            logits, self.direct_memory_feature = self.networks[
-                'classifier'](features, self.centroids)
+                # During training, calculate centroids if needed to.
+                if is_train_phase:
+                    if self.memory['use_centroids'] and 'FeatureLoss' in self.criterions.keys():
+                        self.centroids = self.criterions['FeatureLoss'].centroids.data
+                    else:
+                        self.centroids = None
 
-            total_logits = torch.cat((total_logits, logits))
-            total_labels = torch.cat((total_labels, labels))
+                # Calculate logits with classifier
+                logits, self.direct_memory_feature = self.networks[
+                    'classifier'](features, self.centroids)
 
-        # Confusion matrix for self.names_of_interest.
-        logits = total_logits.to("cpu").numpy()
-        labels = total_labels.to("cpu").numpy()
-        sample_ids = np.isin(labels, self.name_ids)
-        labels = labels[sample_ids]  # Filter non-interesting GT samples.
-        labels = np.array([self.name_ids.index(x) for x in labels])  # Relabel GT.
-        logits = logits[sample_ids, :]  # Filter non-interesting GT samples.
-        logits = logits[:, self.name_ids]  # Remove predictions of non-interesting classes.
-        wandb.log({'confusion_matrix': wandb.plot.confusion_matrix(
-            probs=logits, y_true=labels, class_names=self.names_of_interest)})
+                total_logits = torch.cat((total_logits, logits))
+                total_labels = torch.cat((total_labels, labels))
 
-        # TP, FP, FN for self.names_of_interest.
-        # print ('eval num_points: %d' % len(total_labels))
-        tp_fp_fn_chart = build_tp_fp_fn_wandb_chart(
-            total_logits, total_labels, self.name_ids, self.names_of_interest)
-        wandb.log({"Eval TP/FP/FN": tp_fp_fn_chart})
-        
-        accuracy_top1 = top_k_accuracy(total_logits, total_labels, 1)
-        accuracy_top5 = top_k_accuracy(total_logits, total_labels, 5)
-        print("Eval-Accuracy top1 : %.2f%%, " % accuracy_top1,
-              " Eval-Accuracy top5 : %.2f%%" % accuracy_top5)
-        wandb.log({"eval-accuracy-top1": accuracy_top1,
-                   "eval-accuracy-top5": accuracy_top5})
+            # Confusion matrix for self.names_of_interest.
+            logits = total_logits.to("cpu").numpy()
+            labels = total_labels.to("cpu").numpy()
+            sample_ids = np.isin(labels, self.name_ids)
+            labels = labels[sample_ids]  # Filter non-interesting GT samples.
+            labels = np.array([self.name_ids.index(x) for x in labels])  # Relabel GT.
+            logits = logits[sample_ids, :]  # Filter non-interesting GT samples.
+            logits = logits[:, self.name_ids]  # Remove predictions of non-interesting classes.
+            wandb.log({'confusion_matrix': wandb.plot.confusion_matrix(
+                probs=logits, y_true=labels, class_names=self.names_of_interest)})
+
+            # TP, FP, FN for self.names_of_interest.
+            # print ('eval num_points: %d' % len(total_labels))
+            tp_fp_fn_chart = build_tp_fp_fn_wandb_chart(
+                total_logits, total_labels, self.name_ids, self.names_of_interest)
+            wandb.log({"Eval TP/FP/FN": tp_fp_fn_chart})
+            
+            accuracy_top1 = top_k_accuracy(total_logits, total_labels, 1)
+            accuracy_top5 = top_k_accuracy(total_logits, total_labels, 5)
+            print("Eval-Accuracy top1 : %.2f%%, " % accuracy_top1,
+                " Eval-Accuracy top5 : %.2f%%" % accuracy_top5)
+            wandb.log({"eval-accuracy-top1": accuracy_top1,
+                    "eval-accuracy-top5": accuracy_top5})
 
         return accuracy_top1
 
     def centroids_cal(self, data):
 
         centroids = torch.zeros(self.training_opt['num_classes'],
-                                self.training_opt['feature_dim'] + self.get_extra_dim()).cuda()
+                                self.training_opt['feature_dim'] + self.get_extra_dim()
+                                ).to(self.device)
 
         print('Calculating centroids.')
 
@@ -377,7 +372,7 @@ class model ():
                     centroids[label] += features[i]
 
         # Average summed features with class count
-        centroids /= torch.tensor(class_count(data)).float().unsqueeze(1).cuda()
+        centroids /= torch.tensor(class_count(data)).float().unsqueeze(1).to(self.device)
 
         return centroids
 
@@ -444,44 +439,45 @@ class model ():
         # In validation or testing mode, set model to eval() and initialize running loss/correct
         for model in self.networks.values():
             model.eval()
-            model.cuda()
+            model.to(self.device)
 
         # The full dataset.
         full_objectids = None  # Lazy init.
         full_probs = None  # Lazy init.
         full_preds = None  # Lazy init.
 
-        # with torch.set_grad_enabled(False):   # <- not needed since model.eval() has been called.
-        for batch in progressbar.progressbar(unlabeled_data):
-            if batch is None:
-                assert 0, 'How did this happen?'
-            inputs = batch["image"].to(self.device)
-            object_ids = batch['objectid'].cpu().numpy()
-            # TODO: is it needed?
-            # inputs = Variable(inputs)
+        with torch.set_grad_enabled(False):
+            
+            for batch in progressbar.progressbar(unlabeled_data):
+                if batch is None:
+                    assert 0, 'How did this happen?'
+                inputs = batch["image"].to(self.device)
+                object_ids = batch['objectid'].cpu().numpy()
+                # TODO: is it needed?
+                # inputs = Variable(inputs)
 
-            # In validation or testing
-            features, _ = self.networks['feat_model'](inputs)
-            # Add info about stamp position on its page.
-            if self.get_extra_dim():
-                stamp_position = get_stamp_position(batch).to(self.device)
-                features = torch.cat((features, stamp_position), dim=1)
+                # In validation or testing
+                features, _ = self.networks['feat_model'](inputs)
+                # Add info about stamp position on its page.
+                if self.get_extra_dim():
+                    stamp_position = get_stamp_position(batch).to(self.device)
+                    features = torch.cat((features, stamp_position), dim=1)
 
-            logits, _ = self.networks['classifier'](features, self.centroids)
-            #self.total_logits = torch.cat((self.total_logits, self.logits))
+                logits, _ = self.networks['classifier'](features, self.centroids)
+                #self.total_logits = torch.cat((self.total_logits, self.logits))
 
-            probs, preds = F.softmax(logits.detach(), dim=1).topk(k=3,
-                                                                    dim=1)
+                probs, preds = F.softmax(logits.detach(), dim=1).topk(k=3,
+                                                                        dim=1)
 
-            probs = probs.cpu().numpy()
-            preds = preds.cpu().numpy()
+                probs = probs.cpu().numpy()
+                preds = preds.cpu().numpy()
 
-            # Openset is thresholded at postprocessing.
-            # Unthresholded preds are needed for ROC curves.
-            # preds[probs < self.training_opt['open_threshold']] = -1
+                # Openset is thresholded at postprocessing.
+                # Unthresholded preds are needed for ROC curves.
+                # preds[probs < self.training_opt['open_threshold']] = -1
 
-            full_objectids = np.concatenate((full_objectids, object_ids)) if full_objectids is not None else object_ids
-            full_probs = np.concatenate((full_probs, probs)) if full_probs is not None else probs
-            full_preds = np.concatenate((full_preds, preds)) if full_preds is not None else preds
+                full_objectids = np.concatenate((full_objectids, object_ids)) if full_objectids is not None else object_ids
+                full_probs = np.concatenate((full_probs, probs)) if full_probs is not None else probs
+                full_preds = np.concatenate((full_preds, preds)) if full_preds is not None else preds
 
         return full_objectids, full_preds, full_probs
