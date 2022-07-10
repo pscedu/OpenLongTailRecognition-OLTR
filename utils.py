@@ -221,7 +221,7 @@ def get_confusion_matrix(logits, labels, N):
 
     return confusion_matrix
 
-def make_grid_with_labels(tensor, labels, nrow=8, limit=20, padding=2, value_range=(-3, 3),
+def make_grid_with_labels(tensor, labels, label_ids, nrow=8, limit=20, padding=2, value_range=(-3, 3),
                           scale_each=False, pad_value=0):
     """Make a grid of images.
 
@@ -250,6 +250,7 @@ def make_grid_with_labels(tensor, labels, nrow=8, limit=20, padding=2, value_ran
     if limit is not None:
         tensor = tensor[:limit, ::]
         labels = labels[:limit]
+        label_ids = label_ids[:limit]
 
     font = 1
     fontScale = 3
@@ -316,7 +317,10 @@ def make_grid_with_labels(tensor, labels, nrow=8, limit=20, padding=2, value_ran
                 org = (0, tensor[k].shape[1])
                 working_image = cv2.UMat(
                     np.asarray(np.transpose(working_tensor.numpy(), (1, 2, 0)) * 255).astype('uint8'))
-                image = cv2.putText(working_image, f'{str(labels[k])}', org, font,
+                image = cv2.putText(working_image, str(labels[k]), org, font,
+                                    fontScale, color, thickness, cv2.LINE_AA)
+                org = (0, int(tensor[k].shape[1] * 0.75))
+                image = cv2.putText(working_image, str(int(label_ids[k])), org, font,
                                     fontScale, color, thickness, cv2.LINE_AA)
                 working_tensor = torchvision.transforms.ToTensor()(image.get())
             grid.narrow(1, y * height + padding, height - padding) \

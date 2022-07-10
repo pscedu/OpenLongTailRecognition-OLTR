@@ -180,7 +180,7 @@ class model ():
 
                     if (ibatch % 10 == 0):
                         image_grid = make_grid_with_labels(
-                                tensor=batch['image'], labels=batch['name'], limit=32, nrow=8)
+                                tensor=batch['image'], labels=batch['name'], label_ids=batch['name_id'], limit=32, nrow=8)
                         wandb.log({"Training images.": wandb.Image(image_grid)})
 
                     # During training, calculate centroids if needed to
@@ -265,9 +265,10 @@ class model ():
             total_logits = torch.empty((0, self.training_opt['num_classes'])).to(self.device)
             total_labels = torch.empty(0, dtype=torch.long).to(self.device)
 
+            # Visualize one batch of images.
             for batch in data:
                 image_grid = make_grid_with_labels(
-                        tensor=batch['image'], labels=batch['name'], limit=32, nrow=8)
+                        tensor=batch['image'], labels=batch['name'], label_ids=batch['name_id'], limit=32, nrow=8)
                 wandb.log({"Eval images.": wandb.Image(image_grid)})
                 break
 
