@@ -34,8 +34,30 @@ def get_parser():
         default=20,
         help="Set logging level. 10: debug, 20: info, 30: warning, 40: error.")
     parser.add_argument('--wandb_mode', 
-        choices=['online', 'offline', 'disabled'], default='online')
+        choices=['online', 'offline', 'disabled'], default='disabled')
+    parser.add_argument('--wandb_name', default='experiment', 
+        help='Name for the wandb dashboard, when wandb is enabled.')
+    parser.add_argument('--use_weighted_sampler', type=int, default=0,
+        help='If non-zero, uses sampler weighted by class frequency.')
+    parser.add_argument('--debug_num_train_classes', type=int, default=10000, 
+        help='Number of the most popular classes for training.')
+    parser.add_argument('--debug_no_albumentation', type=int, default=0, 
+        help='If non-zero, uses only random crop for augmentation.')
     return parser
+
+
+def GetWeightedSampler(dataset):
+    names = dataset.execute('SELECT name FROM objects WHERE objectid IN '
+        '(SELECT objectid FROM properties WHERE key = "name_id" AND value IN ("0","1","2","3","4","5","6","7","8","9"))')
+    count_by_name = {}
+    for name in names:
+        if name not in count_by_name:
+            count_by_name[name] = 0
+        count_by_name[name] += 1
+    count_by_sample = [count_by_name[name] for name in names]
+    weight_by_sample = [1. / x for x in count_by_sample]
+    return torch.utils.data.WeightedRandomSampler(
+        weight_by_sample, len(weight_by_sample))
 
 
 def train(args):
@@ -59,25 +81,33 @@ def train(args):
         weights_path = None
         print ('Init weights dir not provided.')
 
-    albumentation_tranform = A.Compose([
-        A.CLAHE(),
-        A.ShiftScaleRotate(shift_limit=0.1,
-                           scale_limit=(0, 0.35),
-                           rotate_limit=20,
-                           p=1.,
-                           border_mode=cv2.BORDER_REPLICATE),
-        A.Blur(blur_limit=1),
-        A.OpticalDistortion(),
-        A.GridDistortion(),
-        A.Resize(224, 224),
-        A.HueSaturationValue(),
-        A.Normalize(
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225],
-        ),
-        ToTensorV2(),
-    ])
-    train_image_transform = lambda x: albumentation_tranform(image=x)['image']
+    if args.debug_no_albumentation:
+        train_image_transform = transforms.Compose([
+            transforms.ToPILImage(),
+            transforms.RandomResizedCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ])
+    else:
+        albumentation_tranform = A.Compose([
+            A.CLAHE(),
+            A.ShiftScaleRotate(shift_limit=0.1,
+                            scale_limit=(0, 0.35),
+                            rotate_limit=20,
+                            p=1.,
+                            border_mode=cv2.BORDER_REPLICATE),
+            A.Blur(blur_limit=1),
+            A.OpticalDistortion(),
+            A.GridDistortion(),
+            A.Resize(224, 224),
+            A.HueSaturationValue(),
+            A.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225],
+            ),
+            ToTensorV2(),
+        ])
+        train_image_transform = lambda x: albumentation_tranform(image=x)['image']
     val_image_transform = transforms.Compose([
         transforms.ToPILImage(),
         transforms.CenterCrop(224),
@@ -99,19 +129,28 @@ def train(args):
     val_transform_group = dict(common_transform_group)
     val_transform_group.update({'image': val_image_transform})
 
+    # Limit the number of objects.
+    object_id_sql_clause = (
+        'objectid IN '
+        '(SELECT objectid FROM properties WHERE key = "name_id" '
+        'AND CAST(value AS INT) < "%d")' % args.debug_num_train_classes)
+    names_sql = (
+        'SELECT DISTINCT(name) FROM objects JOIN properties ON objects.objectid = properties.objectid '
+        'WHERE key = "name_id" AND CAST(value AS INT) < "%d"' % args.debug_num_train_classes)
+
     train_dataset = datasets.ObjectDataset(
         args.train_db_file,
         rootdir=args.rootdir,
+        where_object=object_id_sql_clause,
         mode='r',
         used_keys=used_keys,
         transform_group=train_transform_group)
     logging.info("Total number of train samples: %d", len(train_dataset))
 
     # Set num_classes everywhere.
-    classes_ids = train_dataset.execute(
-        "SELECT DISTINCT(value) FROM properties WHERE key == 'name_id'")
-    classes_ids = [x[0] for x in classes_ids]
-    num_classes = len(classes_ids)
+    names = train_dataset.execute(names_sql)
+    names = [x[0] for x in names]
+    num_classes = len(names)
     logging.info('num_classes: %d', num_classes)
     config['training_opt']['num_classes'] = num_classes
     config['networks']['classifier']['params']['num_classes'] = num_classes
@@ -122,12 +161,11 @@ def train(args):
     # open_set = [item for item in data if item["name_id"] == -1]
 
     # Validation dataset needs to have classes present in training dataset.
-    classes_ids_str = "'" + "', '".join(classes_ids) + "'"
+    names_str = "'" + "', '".join(names) + "'"
     val_dataset = datasets.ObjectDataset(
         args.val_db_file,
         rootdir=args.rootdir,
-        where_object="objectid IN "
-                     "(SELECT objectid FROM properties WHERE key = 'name_id' AND value IN (%s))" % classes_ids_str,
+        where_object="name IN (%s)" % names_str,
         mode='r',
         used_keys=used_keys,
         transform_group=val_transform_group)
@@ -137,16 +175,19 @@ def train(args):
     model = run_networks.model(config, test=False, init_weights_path=weights_path)
     logging.info('Created training model.')
 
+    logging.info('Using weighted sample is %s' % str(args.use_weighted_sampler != 0))
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=config['training_opt']['batch_size'],
         num_workers=config['training_opt']['num_workers'],
-        shuffle=True)
+        sampler=GetWeightedSampler(train_dataset) if args.use_weighted_sampler != 0 else None)
 
     val_dataloader = torch.utils.data.DataLoader(
         val_dataset,
         batch_size=config['training_opt']['batch_size'],
-        num_workers=config['training_opt']['num_workers'])
+        num_workers=config['training_opt']['num_workers'],
+        shuffle=True  # For easy visualization of many eval images in Wandb.
+    )
 
     logging.info('Created dataloaders.')
 
@@ -154,19 +195,18 @@ def train(args):
         encoding = json.loads(f.read())
     model.name_encoding = encoding
 
-    wandb.init(project="stamps", entity="etoropov", config=config, name='test2',
-               mode=args.wandb_mode)
+    wandb.init(project="stamps", entity="etoropov", config=config, 
+               name=args.wandb_name, mode=args.wandb_mode)
 
     # Log histogram of name_ids, in both train and test.
-    popular_names_sql = ("SELECT name FROM objects WHERE name IN ("
-                           "SELECT name FROM objects WHERE name NOT LIKE '%%page%%' "
-                           "GROUP BY name ORDER BY COUNT(1) DESC LIMIT 10)")
+    kPopularNamesLimit = min(args.debug_num_train_classes, 20)
+    popular_names_sql = (
+        "SELECT name FROM objects "
+        "GROUP BY name ORDER BY COUNT(1) DESC LIMIT %d" % kPopularNamesLimit)
     popular_train_names = [(x, "train") for x, in train_dataset.execute(popular_names_sql)]
-    popular_val_names   = [(x, "val") for x, in val_dataset.execute(popular_names_sql)]
-    popular_names = popular_train_names + popular_val_names
+    # popular_val_names   = [(x, "val") for x, in val_dataset.execute(popular_names_sql)]
+    popular_names = popular_train_names #+ popular_val_names
     popular_names_table = wandb.Table(data=popular_names, columns=['class_name', 'subset'])
-    # wandb.log({'gt_names': wandb.plot.scatter(
-    #     names_table, x='class_name', y='subset', title="Distribution of names.")})
     names_chart = wandb.plot_table(vega_spec_name="etoropov/gt_histogram",
                 data_table=popular_names_table,
                 fields={"x": "class_name", "y": "subset"})
