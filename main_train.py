@@ -11,6 +11,8 @@ from albumentations.pytorch.transforms import ToTensorV2
 import simplejson as json
 import wandb
 
+from shuffler.interface.pytorch import datasets
+
 import run_networks
 import utils
 
@@ -18,7 +20,6 @@ import utils
 def get_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True, type=str)
-    parser.add_argument('--shuffler_dir', required=True, type=str)
     parser.add_argument('--rootdir', required=True, type=str)
     parser.add_argument('--train_db_file', required=True, type=str)
     parser.add_argument('--val_db_file', required=True, type=str)
@@ -61,11 +62,6 @@ def GetWeightedSampler(dataset):
 
 
 def train(args):
-    # TODO: Shall we use utils.source_import here too?
-    sys.path.append(args.shuffler_dir)
-    print('Adding to path: %s' % args.shuffler_dir)
-    from interface.pytorch import datasets
-
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
 

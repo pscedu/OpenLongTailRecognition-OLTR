@@ -9,6 +9,8 @@ import simplejson as json
 from torchvision import transforms
 import progressbar
 
+from shuffler.interface.pytorch import datasets
+
 import run_networks
 import utils
 
@@ -18,7 +20,6 @@ def get_parser():
     parser.add_argument('--config',
                         default='config/stamps/stage_2_meta_embedding.py',
                         type=str)
-    parser.add_argument('--shuffler_dir', required=True, type=str)
     parser.add_argument('--encoding_file', required=True, type=str)
     parser.add_argument('--rootdir', required=True, type=str)
     parser.add_argument('--weights_dir', required=True, type=str)
@@ -36,11 +37,6 @@ def get_parser():
 
 
 def inference(args):
-    # TODO: Shall we use utils.source_import here too?
-    sys.path.append(args.shuffler_dir)
-    print('Adding to path: %s' % args.shuffler_dir)
-    from interface.pytorch import datasets
-
     config = utils.source_import(args.config).config
     # config['training_opt']['log_dir'] = args.output_dir
     pprint.pprint(config)
@@ -71,8 +67,8 @@ def inference(args):
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ])
 
-    used_keys = ['image', 'objectid',
-                 'x_on_page', 'width_on_page', 'y_on_page', 'height_on_page']
+    used_keys = ['image', 'objectid']
+    #            'x_on_page', 'width_on_page', 'y_on_page', 'height_on_page']
 
     shutil.copyfile(args.in_db_file, args.out_db_file)
     dataset = datasets.ObjectDataset(args.out_db_file,
